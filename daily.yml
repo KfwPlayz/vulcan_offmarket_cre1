@@ -1,0 +1,51 @@
+name: Daily Vulcan7 Off-Market Job
+
+on:
+  schedule:
+    # 13:00 UTC every day (9:00 AM Eastern during daylight saving)
+    - cron: "0 13 * * *"
+  workflow_dispatch: {}  # lets you run it manually
+
+jobs:
+  run:
+    runs-on: ubuntu-latest
+    env:
+      EMAIL: ${{ secrets.EMAIL }}
+      PASSWORD: ${{ secrets.PASSWORD }}
+      WEBHOOK_URL: ${{ secrets.WEBHOOK_URL }}
+      PUPPETEER_SKIP_DOWNLOAD: "true"  # we install system Chromium
+      PUPPETEER_EXECUTABLE_PATH: /usr/bin/chromium-browser
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+
+      - name: Install deps
+        run: npm ci
+
+      # Optional: restore cache for your JSON dedupe file
+      - name: Restore dedupe cache
+        uses: actions/cache@v4
+        with:
+          path: sent-leads-cache-offmarket.json
+          key: offmarket-cache-v1
+
+      - name: Install Chromium
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y chromium-browser
+
+      - name: Run script
+        run: node vulcan7_offmarket_script.js
+
+      # Optional: save updated cache
+      - name: Save dedupe cache
+        if: always()
+        uses: actions/cache/save@v4
+        with:
+          path: sent-leads-cache-offmarket.json
+          key: offmarket-cache-v1
