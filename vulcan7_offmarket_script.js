@@ -3,7 +3,6 @@ const puppeteer = require("puppeteer");
 const axios = require("axios");
 const fs = require("fs");
 const path = require("path");
-const { Parser } = require("json2csv");
 
 // 🔐 Credentials and Constants
 const LOGIN_URL = "https://www.vulcan7dialer.com/login";
