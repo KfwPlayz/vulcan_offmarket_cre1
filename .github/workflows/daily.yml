@@ -2,7 +2,8 @@ name: Daily Vulcan7 Off-Market Job
 
 on:
   schedule:
-    - cron: "0 13 * * *"   # 9:00 AM ET during DST; adjust as needed
+    # Runs every day at 13:00 UTC (9:00 AM Eastern during daylight saving)
+    - cron: "0 13 * * *"
   workflow_dispatch: {}
 
 jobs:
@@ -12,8 +13,7 @@ jobs:
       EMAIL: ${{ secrets.EMAIL }}
       PASSWORD: ${{ secrets.PASSWORD }}
       WEBHOOK_URL: ${{ secrets.WEBHOOK_URL }}
-      PUPPETEER_SKIP_DOWNLOAD: "true"           # we install system Chromium
-      PUPPETEER_EXECUTABLE_PATH: /usr/bin/chromium-browser
+      PUPPETEER_SKIP_DOWNLOAD: "true"  # we install system Chromium
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -36,7 +36,11 @@ jobs:
         run: |
           sudo apt-get update
           sudo apt-get install -y chromium-browser || sudo apt-get install -y chromium
-          if [ -x /usr/bin/chromium ]; then echo "PUPPETEER_EXECUTABLE_PATH=/usr/bin/chromium" >> $GITHUB_ENV; fi
+          if command -v chromium-browser >/dev/null 2>&1; then
+            echo "PUPPETEER_EXECUTABLE_PATH=$(command -v chromium-browser)" >> $GITHUB_ENV
+          elif command -v chromium >/dev/null 2>&1; then
+            echo "PUPPETEER_EXECUTABLE_PATH=$(command -v chromium)" >> $GITHUB_ENV
+          fi
 
       - name: Run script
         run: node vulcan7_offmarket_script.js
@@ -47,3 +51,13 @@ jobs:
         with:
           path: sent-leads-cache-offmarket.json
           key: offmarket-cache-v1
+
+      - name: Upload failure artifact
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: debug-artifacts
+          path: |
+            failure.png
+            sent-leads-cache-offmarket.json
+          if-no-files-found: ignore
