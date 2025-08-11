@@ -79,7 +79,7 @@ const folderName = `Expired Leads Week of ${monday.getMonth() + 1}.${monday.getD
     // ✅ Scrape contacts from Off Market folder
     await page.goto(CONTACTS_URL, { waitUntil: "domcontentloaded", timeout: 120000 });
     await page.waitForSelector("tr[data-itemid]", { timeout: 120000 });
-    await new Promise(resolve => setTimeout(resolve, 1500));
+    await page.waitForTimeout(1500);
 
     const leads = await page.evaluate(() => {
       const rows = document.querySelectorAll("tr[data-itemid]");
@@ -171,7 +171,7 @@ const folderName = `Expired Leads Week of ${monday.getMonth() + 1}.${monday.getD
         Object.assign(lead, { street: "", city: "", state: "", zip: "" });
       } finally {
         await detailPage.close();
-        await new Promise(r => setTimeout(r, 300));
+        await page.waitForTimeout(300);
       }
     }
 
@@ -202,7 +202,6 @@ const folderName = `Expired Leads Week of ${monday.getMonth() + 1}.${monday.getD
     if (!folderExists) {
       console.log(`📁 Creating folder "${folderName}"`);
       await page.goto(FOLDER_URL, { waitUntil: "domcontentloaded", timeout: 120000 });
-
       try {
         await page.waitForSelector("#new_folder_button", { timeout: 120000 });
         await page.click("#new_folder_button");
@@ -220,7 +219,7 @@ const folderName = `Expired Leads Week of ${monday.getMonth() + 1}.${monday.getD
         } catch {}
         try { await page.select("#layout", "8109"); } catch {}
         try { await page.click("button[type='submit']"); } catch {}
-        await new Promise(r => setTimeout(r, 3000));
+        await page.waitForTimeout(3000);
       } catch (err) {
         console.warn(`⚠️ Folder creation flow might have changed: ${err.message}`);
       }
@@ -228,23 +227,52 @@ const folderName = `Expired Leads Week of ${monday.getMonth() + 1}.${monday.getD
       console.log(`✅ Folder "${folderName}" already exists — skipping creation.`);
     }
 
-    // 📂 Move contacts
+    // 📂 Move contacts (robust)
     await page.goto(CONTACTS_URL, { waitUntil: "domcontentloaded", timeout: 120000 });
     await page.waitForSelector("#master_checkbox", { visible: true, timeout: 120000 });
     await page.click("#master_checkbox");
     console.log("✅ Selected all contacts via master checkbox.");
 
+    // Click the Move button
     await page.waitForSelector("#cm_move_button", { visible: true, timeout: 120000 });
     await page.click("#cm_move_button");
-    console.log("📂 Opened move dropdown");
-    await page.waitForSelector("#cm_move_dropdown", { visible: true, timeout: 120000 });
+    await page.waitForTimeout(800);
 
+    // Wait for either the dropdown container OR the folder items to exist
+    const menuShown = await page.waitForFunction(() => {
+      return !!document.querySelector("#cm_move_dropdown") ||
+             document.querySelectorAll("li.move-contacts-folder[title]").length > 0 ||
+             document.querySelectorAll("#cm_move_dropdown li, .dropdown-menu li").length > 0;
+    }, { timeout: 10000 }).catch(() => false);
+
+    // If not shown, try clicking again once
+    if (!menuShown) {
+      console.log("↻ Move menu not detected, retrying click…");
+      await page.click("#cm_move_button");
+      await page.waitForTimeout(1200);
+    }
+
+    // Log what we see for debugging
+    const menuDebug = await page.evaluate(() => ({
+      hasDropdown: !!document.querySelector("#cm_move_dropdown"),
+      itemsByTitle: document.querySelectorAll("li.move-contacts-folder[title]").length,
+      anyLis: document.querySelectorAll("#cm_move_dropdown li, .dropdown-menu li").length
+    }));
+    console.log("ℹ️ Move menu debug:", JSON.stringify(menuDebug));
+
+    // Try to click the target folder in a broad way
     const moveSuccess = await page.evaluate((folderName) => {
-      const folderItems = document.querySelectorAll("li.move-contacts-folder[title]");
-      for (const item of folderItems) {
-        if (item.title.trim() === folderName.trim()) {
-          item.querySelector("a.move-to-folder")?.click();
-          return true;
+      // Primary selector set
+      let items = Array.from(document.querySelectorAll("li.move-contacts-folder[title]"));
+      if (!items.length) {
+        // Fallback: any li under common dropdown containers
+        items = Array.from(document.querySelectorAll("#cm_move_dropdown li, .dropdown-menu li, li"));
+      }
+      for (const item of items) {
+        const title = (item.getAttribute("title") || item.textContent || "").trim();
+        if (title === folderName.trim()) {
+          const link = item.querySelector("a.move-to-folder") || item.querySelector("a, .dropdown-item, button");
+          if (link) { link.click(); return true; }
         }
       }
       return false;
@@ -261,9 +289,10 @@ const folderName = `Expired Leads Week of ${monday.getMonth() + 1}.${monday.getD
 
     if (moveSuccess) {
       console.log(`✅ Move to folder "${folderName}" triggered`);
-      await new Promise(r => setTimeout(r, 3000)); // give time for the move to process
+      await page.waitForTimeout(3000);
     } else {
       console.error(`❌ Could not find move folder: ${folderName}`);
+      try { await page.screenshot({ path: "failure_move.png", fullPage: true }); } catch {}
     }
 
   } catch (err) {
