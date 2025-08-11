@@ -4,6 +4,9 @@ const axios = require("axios");
 const fs = require("fs");
 const path = require("path");
 
+// Small helper that works on every Node/Puppeteer version
+const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+
 // 🔐 Credentials and Constants
 const LOGIN_URL = "https://www.vulcan7dialer.com/login";
 const CONTACTS_URL = "https://www.vulcan7dialer.com/cm/index#params/dmlld19pZD05ODEzOCZwYWdlPTE=";
@@ -79,7 +82,7 @@ const folderName = `Expired Leads Week of ${monday.getMonth() + 1}.${monday.getD
     // ✅ Scrape contacts from Off Market folder
     await page.goto(CONTACTS_URL, { waitUntil: "domcontentloaded", timeout: 120000 });
     await page.waitForSelector("tr[data-itemid]", { timeout: 120000 });
-    await page.waitForTimeout(1500);
+    await sleep(1500);
 
     const leads = await page.evaluate(() => {
       const rows = document.querySelectorAll("tr[data-itemid]");
@@ -171,7 +174,7 @@ const folderName = `Expired Leads Week of ${monday.getMonth() + 1}.${monday.getD
         Object.assign(lead, { street: "", city: "", state: "", zip: "" });
       } finally {
         await detailPage.close();
-        await page.waitForTimeout(300);
+        await sleep(300);
       }
     }
 
@@ -219,7 +222,7 @@ const folderName = `Expired Leads Week of ${monday.getMonth() + 1}.${monday.getD
         } catch {}
         try { await page.select("#layout", "8109"); } catch {}
         try { await page.click("button[type='submit']"); } catch {}
-        await page.waitForTimeout(3000);
+        await sleep(3000);
       } catch (err) {
         console.warn(`⚠️ Folder creation flow might have changed: ${err.message}`);
       }
@@ -236,7 +239,7 @@ const folderName = `Expired Leads Week of ${monday.getMonth() + 1}.${monday.getD
     // Click the Move button
     await page.waitForSelector("#cm_move_button", { visible: true, timeout: 120000 });
     await page.click("#cm_move_button");
-    await page.waitForTimeout(800);
+    await sleep(800);
 
     // Wait for either the dropdown container OR the folder items to exist
     const menuShown = await page.waitForFunction(() => {
@@ -249,7 +252,7 @@ const folderName = `Expired Leads Week of ${monday.getMonth() + 1}.${monday.getD
     if (!menuShown) {
       console.log("↻ Move menu not detected, retrying click…");
       await page.click("#cm_move_button");
-      await page.waitForTimeout(1200);
+      await sleep(1200);
     }
 
     // Log what we see for debugging
@@ -262,10 +265,8 @@ const folderName = `Expired Leads Week of ${monday.getMonth() + 1}.${monday.getD
 
     // Try to click the target folder in a broad way
     const moveSuccess = await page.evaluate((folderName) => {
-      // Primary selector set
       let items = Array.from(document.querySelectorAll("li.move-contacts-folder[title]"));
       if (!items.length) {
-        // Fallback: any li under common dropdown containers
         items = Array.from(document.querySelectorAll("#cm_move_dropdown li, .dropdown-menu li, li"));
       }
       for (const item of items) {
@@ -289,7 +290,7 @@ const folderName = `Expired Leads Week of ${monday.getMonth() + 1}.${monday.getD
 
     if (moveSuccess) {
       console.log(`✅ Move to folder "${folderName}" triggered`);
-      await page.waitForTimeout(3000);
+      await sleep(3000);
     } else {
       console.error(`❌ Could not find move folder: ${folderName}`);
       try { await page.screenshot({ path: "failure_move.png", fullPage: true }); } catch {}
