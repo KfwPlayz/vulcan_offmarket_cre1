@@ -2,8 +2,8 @@ name: Daily Vulcan7 Off-Market Job
 
 on:
   schedule:
-    # Runs every day at 13:00 UTC (9:00 AM Eastern during daylight saving)
-    - cron: "0 13 * * *"
+    - cron: "0 13 * * *"  # 9:00 AM ET during DST (UTC-4)
+    - cron: "0 14 * * *"  # 9:00 AM ET during Standard Time (UTC-5)
   workflow_dispatch: {}
 
 jobs:
@@ -15,11 +15,18 @@ jobs:
       WEBHOOK_URL: ${{ secrets.WEBHOOK_URL }}
       PUPPETEER_SKIP_DOWNLOAD: "true"  # we install system Chromium
     steps:
-      - name: Checkout
-        uses: actions/checkout@v4
+      - name: Gate to exactly 9:00 AM ET
+        run: |
+          NOW_ET=$(TZ=America/New_York date +'%H:%M')
+          echo "Now ET: $NOW_ET"
+          if [ "$NOW_ET" != "09:00" ]; then
+            echo "Not 09:00 ET — exiting."
+            exit 0
+          fi
 
-      - name: Set up Node
-        uses: actions/setup-node@v4
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
         with:
           node-version: "20"
 
