@@ -2,9 +2,19 @@ name: Daily Vulcan7 Off-Market Job
 
 on:
   schedule:
-    - cron: "0 13 * * *"  # 9:00 AM ET during DST (UTC-4)
-    - cron: "0 14 * * *"  # 9:00 AM ET during Standard Time (UTC-5)
-  workflow_dispatch: {}
+    - cron: "0 13 * * *"   # 9:00 AM ET during DST (UTC-4)
+    - cron: "0 14 * * *"   # 9:00 AM ET during Standard Time (UTC-5)
+  workflow_dispatch:
+    inputs:
+      force:
+        description: "Run even if today's lock exists"
+        required: false
+        type: boolean
+        default: false
+
+permissions:
+  contents: read
+  actions: write
 
 jobs:
   run:
@@ -13,8 +23,30 @@ jobs:
       EMAIL: ${{ secrets.EMAIL }}
       PASSWORD: ${{ secrets.PASSWORD }}
       WEBHOOK_URL: ${{ secrets.WEBHOOK_URL }}
-      PUPPETEER_SKIP_DOWNLOAD: "true"  # we install system Chromium
+      PUPPETEER_SKIP_DOWNLOAD: "true"
+
     steps:
+      # 0) Compute today's ET date
+      - name: Compute ET date
+        id: date
+        run: echo "DATE_ET=$(TZ=America/New_York date +%Y-%m-%d)" >> $GITHUB_OUTPUT
+
+      # 1) Acquire a per-day lock (first run wins)
+      - name: Acquire daily lock
+        id: lock
+        uses: actions/cache@v4
+        with:
+          path: .daily-lock
+          key: daily-lock-${{ steps.date.outputs.DATE_ET }}
+
+      # 2) Exit if we've already run today (unless manual 'force' is true)
+      - name: Exit if already ran today
+        if: steps.lock.outputs.cache-hit == 'true' && !(github.event_name == 'workflow_dispatch' && github.event.inputs.force == 'true')
+        run: |
+          echo "Already ran on ${{ steps.date.outputs.DATE_ET }} ET — skipping."
+          exit 0
+
+      # 3) Gate to exactly 9:00 AM ET
       - name: Gate to exactly 9:00 AM ET
         run: |
           NOW_ET=$(TZ=America/New_York date +'%H:%M')
@@ -24,6 +56,7 @@ jobs:
             exit 0
           fi
 
+      # 4) Proceed with the job
       - uses: actions/checkout@v4
 
       - uses: actions/setup-node@v4
@@ -33,11 +66,13 @@ jobs:
       - name: Install deps
         run: npm install --no-audit --no-fund
 
-      - name: Restore dedupe cache
+      # ⬇️ Same-day dedupe cache (ET date–scoped)
+      - name: Restore dedupe cache (today only)
+        id: dedupe_cache
         uses: actions/cache@v4
         with:
           path: sent-leads-cache-offmarket.json
-          key: offmarket-cache-v1
+          key: offmarket-cache-${{ steps.date.outputs.DATE_ET }}
 
       - name: Install Chromium
         run: |
@@ -50,14 +85,23 @@ jobs:
           fi
 
       - name: Run script
-        run: node vulcan7_offmarket_script.js
+        run: node vulcan7_offmarket_script_min_ci.js
 
-      - name: Save dedupe cache
-        if: always()
+      # 5) Save the daily lock so the later cron won't run
+      - name: Save daily lock
+        if: steps.lock.outputs.cache-hit != 'true'
+        uses: actions/cache/save@v4
+        with:
+          path: .daily-lock
+          key: daily-lock-${{ steps.date.outputs.DATE_ET }}
+
+      # ⬇️ Save today's dedupe cache (only if not already present)
+      - name: Save dedupe cache (today)
+        if: steps.dedupe_cache.outputs.cache-hit != 'true'
         uses: actions/cache/save@v4
         with:
           path: sent-leads-cache-offmarket.json
-          key: offmarket-cache-v1
+          key: offmarket-cache-${{ steps.date.outputs.DATE_ET }}
 
       - name: Upload failure artifact
         if: failure()
@@ -66,5 +110,6 @@ jobs:
           name: debug-artifacts
           path: |
             failure.png
+            failure_move.png
             sent-leads-cache-offmarket.json
           if-no-files-found: ignore
