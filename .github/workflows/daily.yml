@@ -85,7 +85,7 @@ jobs:
           fi
 
       - name: Run script
-        run: node vulcan7_offmarket_script_min_ci.js
+        run: node vulcan7_offmarket_script.js
 
       # 5) Save the daily lock so the later cron won't run
       - name: Save daily lock
