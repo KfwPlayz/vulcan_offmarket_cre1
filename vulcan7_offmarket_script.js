@@ -92,7 +92,9 @@ async function clickFolderByName(page, name) {
 
   page.on("console", (msg) => console.log("[BROWSER]", msg.type(), msg.text()));
   page.on("pageerror", (err) => console.log("[PAGEERROR]", err));
-  page.on("requestfailed", (req) => console.log("[REQ FAILED]", req.url(), req.failure()?.errorText));
+  page.on("requestfailed", (req) =>
+    console.log("[REQ FAILED]", req.url(), req.failure()?.errorText)
+  );
   // === end CI hardening ===
 
   try {
@@ -107,8 +109,8 @@ async function clickFolderByName(page, name) {
 
     const emailSel =
       (await page.$('input[name="email"]')) ? 'input[name="email"]'
-      : (await page.$("#email")) ? "#email"
-      : 'input[name="username"]';
+        : (await page.$("#email")) ? "#email"
+          : 'input[name="username"]';
 
     const passSel = (await page.$('input[name="password"]')) ? 'input[name="password"]' : "#password";
 
@@ -135,7 +137,6 @@ async function clickFolderByName(page, name) {
     await page.goto(CONTACTS_SHELL_URL, { waitUntil: "domcontentloaded", timeout: 120000 });
     await sleep(1500);
 
-    // Some accounts land on a default view; click the folder explicitly
     await clickFolderByName(page, "Off Market");
     await sleep(2000);
 
@@ -226,7 +227,6 @@ async function clickFolderByName(page, name) {
 
     console.log(`✅ Found ${leads.length} raw leads in "Off Market"`);
 
-    // If zero, dump diagnostics (helps when folder is empty vs layout mismatch)
     if (!leads.length) {
       try { await page.screenshot({ path: "failure_contacts_empty.png", fullPage: true }); } catch {}
       try { fs.writeFileSync("failure_contacts_empty.html", await page.content()); } catch {}
@@ -316,7 +316,6 @@ async function clickFolderByName(page, name) {
           const getByLabel = (label) => {
             const want = normLabel(label);
 
-            // Look for exact label match nodes
             const candidates = Array.from(rpRoot.querySelectorAll("div,span,td,th,strong,b"))
               .filter((el) => normLabel(safeText(el)) === want);
 
@@ -326,7 +325,6 @@ async function clickFolderByName(page, name) {
             const row = lab.closest("tr") || lab.parentElement;
             if (!row) return "";
 
-            // Table row pattern
             if ((row.tagName || "").toLowerCase() === "tr") {
               const cells = Array.from(row.querySelectorAll("td,th,div,span"))
                 .map(safeText)
@@ -335,11 +333,9 @@ async function clickFolderByName(page, name) {
               if (idx >= 0 && cells[idx + 1]) return cells[idx + 1];
             }
 
-            // Non-table pattern: sibling or next element
             const sib = lab.nextElementSibling;
             if (sib && safeText(sib)) return safeText(sib);
 
-            // Fallback: within row container
             const parts = Array.from(row.querySelectorAll("div,span,td"))
               .map(safeText)
               .filter(Boolean);
@@ -535,14 +531,18 @@ async function clickFolderByName(page, name) {
       console.log(`✅ Folder "${folderName}" already exists — skipping creation.`);
     }
 
-    // 📂 Move contacts (robust)
+    // 📂 Move contacts (robust + avoids huge DOM scans)
     await page.goto(CONTACTS_SHELL_URL, { waitUntil: "domcontentloaded", timeout: 120000 });
     await sleep(1500);
     await clickFolderByName(page, "Off Market");
     await sleep(1500);
 
-    // master checkbox might vary; keep your original selector but add fallback
-    const masterSelectorCandidates = ["#master_checkbox", "input#master_checkbox", "input[type='checkbox'][id*='master']"];
+    // master checkbox selector (with fallback candidates)
+    const masterSelectorCandidates = [
+      "#master_checkbox",
+      "input#master_checkbox",
+      "input[type='checkbox'][id*='master']",
+    ];
     let masterSel = null;
     for (const sel of masterSelectorCandidates) {
       if (await page.$(sel)) { masterSel = sel; break; }
@@ -553,8 +553,8 @@ async function clickFolderByName(page, name) {
     await page.click(masterSel);
     console.log("✅ Selected all contacts via master checkbox.");
 
-    // Move button
-    const moveBtnCandidates = ["#cm_move_button", "button#cm_move_button", "button:has-text('Move')"];
+    // Move button selector candidates (Puppeteer only; no Playwright selectors)
+    const moveBtnCandidates = ["#cm_move_button", "button#cm_move_button"];
     let moveSel = null;
     for (const sel of moveBtnCandidates) {
       if (await page.$(sel)) { moveSel = sel; break; }
@@ -587,22 +587,33 @@ async function clickFolderByName(page, name) {
     }));
     console.log("ℹ️ Move menu debug:", JSON.stringify(menuDebug));
 
-    const moveSuccess = await page.evaluate((targetFolderName) => {
-      let items = Array.from(document.querySelectorAll("li.move-contacts-folder[title]"));
-      if (!items.length) {
-        items = Array.from(document.querySelectorAll("#cm_move_dropdown li, .dropdown-menu li, li"));
-      }
-      for (const item of items) {
-        const title = (item.getAttribute("title") || item.textContent || "").trim();
-        if (title === targetFolderName.trim()) {
-          const link = item.querySelector("a.move-to-folder") || item.querySelector("a, .dropdown-item, button");
-          if (link) { link.click(); return true; }
-        }
-      }
-      return false;
-    }, folderName);
+    // ✅ Click the target folder WITHOUT scanning hundreds of nodes in a big loop
+    let moveSuccess = false;
 
-    // Confirm modal
+    const safeFolderName = folderName.replace(/"/g, '\\"');
+    const targetLinkSel = `li.move-contacts-folder[title="${safeFolderName}"] a.move-to-folder`;
+
+    // Try direct click (fast)
+    const directHandle = await page.$(targetLinkSel);
+    if (directHandle) {
+      await directHandle.click();
+      moveSuccess = true;
+    } else {
+      // Fallback: narrow search to dropdown only (still small)
+      moveSuccess = await page.evaluate((fn) => {
+        const dropdown = document.querySelector("#cm_move_dropdown") || document;
+        const items = Array.from(dropdown.querySelectorAll("li.move-contacts-folder[title]"));
+        const match = items.find(li => (li.getAttribute("title") || "").trim() === fn.trim());
+        const link = match?.querySelector("a.move-to-folder, a, button");
+        if (link) { link.click(); return true; }
+        return false;
+      }, folderName);
+    }
+
+    // Sometimes overlays interfere; closing dropdown can help
+    try { await page.keyboard.press("Escape"); } catch {}
+
+    // Confirm modal if it appears
     try {
       await page.waitForSelector("#bulk_actions_modal button.btn.btn-primary", { visible: true, timeout: 5000 });
       await page.click("#bulk_actions_modal button.btn.btn-primary");
@@ -617,11 +628,13 @@ async function clickFolderByName(page, name) {
     } else {
       console.error(`❌ Could not find move folder: ${folderName}`);
       try { await page.screenshot({ path: "failure_move.png", fullPage: true }); } catch {}
+      try { fs.writeFileSync("failure_move.html", await page.content()); } catch {}
     }
 
   } catch (err) {
     console.error("❌ Script Error:", err);
     try { await page.screenshot({ path: "failure.png", fullPage: true }); } catch {}
+    try { fs.writeFileSync("failure.html", await page.content()); } catch {}
     process.exitCode = 1;
   } finally {
     await browser.close();
