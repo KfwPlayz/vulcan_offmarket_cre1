@@ -9,25 +9,54 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
 // 🔐 Credentials and Constants
 const LOGIN_URL = "https://www.vulcan7dialer.com/login";
-const CONTACTS_URL = "https://www.vulcan7dialer.com/cm/index#params/dmlld19pZD05ODEzOCZwYWdlPTE=";
+const CONTACTS_SHELL_URL = "https://www.vulcan7dialer.com/cm/index#contacts";
 const FOLDER_URL = "https://www.vulcan7dialer.com/cm/folders/index";
+
 const EMAIL = process.env.EMAIL;
 const PASSWORD = process.env.PASSWORD;
 const WEBHOOK_URL = process.env.WEBHOOK_URL;
+
 const CACHE_FILE = path.join(__dirname, "sent-leads-cache-offmarket.json");
 
 // 📅 Folder name = Monday of current week
 const today = new Date();
 const day = today.getDay();
-const offset = (day === 0) ? -6 : 1 - day;
+const offset = day === 0 ? -6 : 1 - day;
 const monday = new Date(today);
 monday.setDate(today.getDate() + offset);
 const folderName = `Expired Leads Week of ${monday.getMonth() + 1}.${monday.getDate()}`;
 
+// Build Google Maps link from address if Vulcan doesn't provide it
 function buildGoogleMapsLink({ street, city, state, zip }) {
   const parts = [street, city, state, zip].filter(Boolean).join(", ");
   if (!parts.trim()) return "";
   return `https://www.google.com/maps/search/?api=1&query=${encodeURIComponent(parts)}`;
+}
+
+// Click folder in left nav by visible text (robust)
+async function clickFolderByName(page, name) {
+  const lower = name.trim().toLowerCase();
+
+  await page.waitForFunction(
+    (lowerName) => {
+      const els = Array.from(document.querySelectorAll("div.contacts-folder-nav-name"));
+      return els.some((el) => (el.textContent || "").trim().toLowerCase() === lowerName);
+    },
+    { timeout: 30000 },
+    lower
+  );
+
+  const clicked = await page.evaluate((lowerName) => {
+    const els = Array.from(document.querySelectorAll("div.contacts-folder-nav-name"));
+    const target = els.find((el) => (el.textContent || "").trim().toLowerCase() === lowerName);
+    if (target) {
+      target.click();
+      return true;
+    }
+    return false;
+  }, lower);
+
+  if (!clicked) throw new Error(`Could not click folder "${name}" in left nav`);
 }
 
 (async () => {
@@ -39,8 +68,8 @@ function buildGoogleMapsLink({ street, city, state, zip }) {
       "--disable-setuid-sandbox",
       "--disable-dev-shm-usage",
       "--disable-gpu",
-      "--single-process"
-    ]
+      "--single-process",
+    ],
   });
 
   const page = await browser.newPage();
@@ -55,74 +84,155 @@ function buildGoogleMapsLink({ street, city, state, zip }) {
   await page.setViewport({ width: 1366, height: 768 });
 
   await page.setRequestInterception(true);
-  page.on("request", req => {
+  page.on("request", (req) => {
     const type = req.resourceType();
     if (type === "image" || type === "font" || type === "media") req.abort();
     else req.continue();
   });
 
-  page.on("console", msg => console.log("[BROWSER]", msg.type(), msg.text()));
-  page.on("pageerror", err => console.log("[PAGEERROR]", err));
-  page.on("requestfailed", req => console.log("[REQ FAILED]", req.url(), req.failure()?.errorText));
+  page.on("console", (msg) => console.log("[BROWSER]", msg.type(), msg.text()));
+  page.on("pageerror", (err) => console.log("[PAGEERROR]", err));
+  page.on("requestfailed", (req) => console.log("[REQ FAILED]", req.url(), req.failure()?.errorText));
   // === end CI hardening ===
 
   try {
+    if (!EMAIL || !PASSWORD || !WEBHOOK_URL) {
+      throw new Error("Missing env vars: EMAIL, PASSWORD, or WEBHOOK_URL");
+    }
+
     // 🔐 Log in to Vulcan7
     await page.goto(LOGIN_URL, { waitUntil: "domcontentloaded", timeout: 120000 });
     await page.waitForSelector('input[name="email"], #email, input[name="username"]', { timeout: 120000 });
     await page.waitForSelector('input[name="password"], #password', { timeout: 120000 });
 
-    const emailSel = (await page.$('input[name="email"]')) ? 'input[name="email"]'
-                     : (await page.$('#email')) ? '#email'
-                     : 'input[name="username"]';
-    const passSel  = (await page.$('input[name="password"]')) ? 'input[name="password"]' : '#password';
+    const emailSel =
+      (await page.$('input[name="email"]')) ? 'input[name="email"]'
+      : (await page.$("#email")) ? "#email"
+      : 'input[name="username"]';
+
+    const passSel = (await page.$('input[name="password"]')) ? 'input[name="password"]' : "#password";
 
     await page.type(emailSel, EMAIL, { delay: 20 });
-    await page.type(passSel,  PASSWORD, { delay: 20 });
+    await page.type(passSel, PASSWORD, { delay: 20 });
 
     await Promise.all([
-      page.waitForNavigation({ waitUntil: "domcontentloaded", timeout: 120000 }),
-      page.click('button[type="submit"], .login-button')
+      page.waitForNavigation({ waitUntil: "domcontentloaded", timeout: 120000 }).catch(() => null),
+      page.click('button[type="submit"], .login-button'),
     ]);
 
-    // ✅ Scrape contacts from Off Market folder
-    await page.goto(CONTACTS_URL, { waitUntil: "domcontentloaded", timeout: 120000 });
-    await page.waitForSelector("tr[data-itemid]", { timeout: 120000 });
+    // ✅ Verify login stuck
+    const urlAfterLogin = page.url();
+    if (urlAfterLogin.includes("/login")) {
+      throw new Error("Login did not complete (still on /login). Check creds, MFA, or selector changes.");
+    }
+
+    const loginFormStillThere = await page.$('input[name="password"], #password');
+    if (loginFormStillThere) {
+      throw new Error("Login form still present after submit. Likely failed login or additional verification step.");
+    }
+
+    // ✅ Go to contacts shell and click Off Market
+    await page.goto(CONTACTS_SHELL_URL, { waitUntil: "domcontentloaded", timeout: 120000 });
     await sleep(1500);
 
-    const leads = await page.evaluate(() => {
-      const rows = document.querySelectorAll("tr[data-itemid]");
-      const leads = [];
+    // Some accounts land on a default view; click the folder explicitly
+    await clickFolderByName(page, "Off Market");
+    await sleep(2000);
 
-      for (const row of rows) {
-        const id = row.getAttribute("data-itemid");
-        const nameEl = row.querySelector(".contact-details-link a");
-        const fullName = nameEl?.innerText?.trim();
+    // ✅ Wait for a grid signal OR a no-results state (handles layout differences)
+    await page.waitForFunction(() => {
+      const hasOldRows = document.querySelectorAll("tr[data-itemid]").length > 0;
+
+      const hasAnyRow =
+        document.querySelectorAll("[data-itemid]").length > 0 ||
+        document.querySelectorAll(".contact-details-link a").length > 0 ||
+        document.querySelectorAll("a[href*='#contact/']").length > 0;
+
+      const bodyText = (document.body?.innerText || "").toLowerCase();
+      const noResults =
+        bodyText.includes("no contacts") ||
+        bodyText.includes("no results") ||
+        bodyText.includes("0 contacts");
+
+      return hasOldRows || hasAnyRow || noResults;
+    }, { timeout: 120000 });
+
+    await sleep(800);
+
+    // ✅ Scrape contacts from Off Market folder (supports multiple layouts)
+    const leads = await page.evaluate(() => {
+      const safeText = (el) => (el?.textContent || "").replace(/\s+/g, " ").trim();
+
+      // Prefer: old table rows
+      let nodes = Array.from(document.querySelectorAll("tr[data-itemid]"));
+      if (!nodes.length) {
+        // Fallback: anything with data-itemid
+        nodes = Array.from(document.querySelectorAll("[data-itemid]"));
+      }
+
+      const results = [];
+
+      for (const node of nodes) {
+        const id = node.getAttribute("data-itemid");
+        if (!id) continue;
+
+        // Name link: old layout uses .contact-details-link a
+        let nameEl = node.querySelector(".contact-details-link a");
+        if (!nameEl) {
+          // fallback: any link that points to #contact/{id} or has contact in hash
+          nameEl =
+            node.querySelector(`a[href*="#contact/${id}"]`) ||
+            node.querySelector(`a[href*="#contact/"]`) ||
+            node.querySelector("a");
+        }
+
+        const fullName = safeText(nameEl);
         if (!fullName) continue;
 
+        // Phone & email in old layout are in cell-example-* ids
         const phoneDiv = document.querySelector(`div[id='cell-example-${id}-143332']`);
-        const phone = phoneDiv?.innerText?.trim() || "";
+        const phone = safeText(phoneDiv) || "";
 
         const emailEl = document.querySelector(`div[id='cell-example-${id}-143333'] a[href^='mailto:']`);
-        const email = emailEl?.getAttribute("href")?.replace("mailto:", "").trim() || "";
+        const email = (emailEl?.getAttribute("href") || "").replace("mailto:", "").trim();
+
+        // Fallback: try to find phone/email within node text
+        let phone2 = phone;
+        if (!phone2) {
+          const text = safeText(node);
+          const m = text.match(/(\(\d{3}\)\s*\d{3}-\d{4})/);
+          phone2 = m ? m[1] : "";
+        }
+
+        let email2 = email;
+        if (!email2) {
+          const m = safeText(node).match(/[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}/i);
+          email2 = m ? m[0] : "";
+        }
 
         const nameParts = fullName.split(" ");
-        leads.push({
+        results.push({
           full_name: fullName,
           first_name: nameParts[0] || "",
           last_name: nameParts.slice(1).join(" "),
-          phone,
-          email,
-          contact_id: id
+          phone: phone2 || "",
+          email: email2 || "",
+          contact_id: id,
         });
       }
 
-      return leads;
+      return results;
     });
 
     console.log(`✅ Found ${leads.length} raw leads in "Off Market"`);
 
-    // 📥 Deduplication
+    // If zero, dump diagnostics (helps when folder is empty vs layout mismatch)
+    if (!leads.length) {
+      try { await page.screenshot({ path: "failure_contacts_empty.png", fullPage: true }); } catch {}
+      try { fs.writeFileSync("failure_contacts_empty.html", await page.content()); } catch {}
+    }
+
+    // 📥 Deduplication (name + phone)
     const seen = new Set(), filtered = [], dupes = [];
     for (const lead of leads) {
       const key = `${lead.full_name}|${lead.phone}`;
@@ -151,235 +261,228 @@ function buildGoogleMapsLink({ street, city, state, zip }) {
       }
     }
 
+    console.log(`📌 Unsent leads: ${unsentLeads.length}`);
+
     // 🔍 Visit each contact detail page to fetch address + extra property/social info
-for (const lead of unsentLeads) {
-  const detailPage = await browser.newPage();
-  try {
-    const detailUrl = `https://www.vulcan7dialer.com/cm/index#contact/${lead.contact_id}`;
-    await detailPage.goto(detailUrl, { waitUntil: "domcontentloaded", timeout: 120000 });
+    for (const lead of unsentLeads) {
+      const detailPage = await browser.newPage();
+      try {
+        const detailUrl = `https://www.vulcan7dialer.com/cm/index#contact/${lead.contact_id}`;
+        await detailPage.goto(detailUrl, { waitUntil: "domcontentloaded", timeout: 120000 });
+        await detailPage.waitForSelector("body", { timeout: 120000 });
+        await sleep(1200);
 
-    // Address is usually present, but don't hard-fail if it isn't.
-    await detailPage.waitForSelector("body", { timeout: 120000 });
-    await sleep(800);
+        // Optional: wait for the Residential Property section to appear (if it exists)
+        await detailPage.waitForFunction(() => {
+          const txt = (document.body?.innerText || "").toLowerCase();
+          return txt.includes("residential property") || txt.includes("contact information");
+        }, { timeout: 8000 }).catch(() => {});
 
-    const detailData = await detailPage.evaluate(() => {
-      const safeText = (el) => (el?.textContent || "").replace(/\s+/g, " ").trim();
+        const detailData = await detailPage.evaluate(() => {
+          const safeText = (el) => (el?.textContent || "").replace(/\s+/g, " ").trim();
 
-      // --- Address (your existing method) ---
-      let address = { street: "", city: "", state: "", zip: "" };
-      const addrEl = document.querySelector('a[data-type="address"]');
-      if (addrEl) {
-        try {
-          const data = JSON.parse(addrEl.getAttribute("data-value") || "{}");
-          address = {
-            street: data.address || "",
-            city: data.city || "",
-            state: data.state || "",
-            zip: data.zip || ""
-          };
-        } catch {}
-      }
+          // --- Address (Vulcan stores JSON in a[data-type="address"]) ---
+          let address = { street: "", city: "", state: "", zip: "" };
+          const addrEl = document.querySelector('a[data-type="address"]');
+          if (addrEl) {
+            try {
+              const data = JSON.parse(addrEl.getAttribute("data-value") || "{}");
+              address = {
+                street: data.address || "",
+                city: data.city || "",
+                state: data.state || "",
+                zip: data.zip || "",
+              };
+            } catch {}
+          }
 
-      // --- Residential Property block (label -> value) ---
-      // Find the section by its header text
-      const headers = Array.from(document.querySelectorAll("h1,h2,h3,h4,div,span"))
-        .filter(el => safeText(el).toLowerCase() === "residential property");
+          // --- Residential Property block (label -> value) ---
+          const normLabel = (s) =>
+            (s || "")
+              .toLowerCase()
+              .replace(/\s+/g, " ")
+              .replace(/:$/, "")
+              .trim();
 
-      // Take the closest container that likely holds the table/rows
-      const rpHeader = headers[0] || null;
-      const rpRoot =
-        rpHeader?.closest("div")?.parentElement ||
-        rpHeader?.closest("section") ||
-        rpHeader?.closest("div") ||
-        document;
+          // Find a container likely holding the property table
+          const all = Array.from(document.querySelectorAll("*"));
+          const rpHeader = all.find((el) => safeText(el).toLowerCase() === "residential property") || null;
+          const rpRoot =
+            rpHeader?.closest("div")?.parentElement ||
+            rpHeader?.closest("section") ||
+            rpHeader?.closest("div") ||
+            document;
 
-      const normLabel = (s) =>
-        (s || "")
-          .toLowerCase()
-          .replace(/\s+/g, " ")
-          .replace(/:$/, "")
-          .trim();
+          const getByLabel = (label) => {
+            const want = normLabel(label);
 
-      // Looks for an element whose text is the label, then reads the next “cell”
-      const getByLabel = (label) => {
-        const want = normLabel(label);
-        const candidates = Array.from(rpRoot.querySelectorAll("div,span,td,th,strong,b"))
-          .filter(el => normLabel(safeText(el)) === want);
+            // Look for exact label match nodes
+            const candidates = Array.from(rpRoot.querySelectorAll("div,span,td,th,strong,b"))
+              .filter((el) => normLabel(safeText(el)) === want);
 
-        const lab = candidates[0];
-        if (!lab) return "";
+            const lab = candidates[0];
+            if (!lab) return "";
 
-        // Common patterns: label cell then value cell (same row / next sibling)
-        const row = lab.closest("tr") || lab.parentElement;
-        if (row) {
-          // if table row, pick the next cell
-          if (row.tagName?.toLowerCase() === "tr") {
-            const cells = Array.from(row.querySelectorAll("td,th,div,span")).map(safeText).filter(Boolean);
-            // usually [Label, Value] or [Label, Value, Label, Value]
-            // find the label index and return the next token if present
-            const idx = cells.findIndex(t => normLabel(t) === want);
-            if (idx >= 0 && cells[idx + 1]) return cells[idx + 1];
-          } else {
-            // non-table layout: try nextElementSibling
+            const row = lab.closest("tr") || lab.parentElement;
+            if (!row) return "";
+
+            // Table row pattern
+            if ((row.tagName || "").toLowerCase() === "tr") {
+              const cells = Array.from(row.querySelectorAll("td,th,div,span"))
+                .map(safeText)
+                .filter(Boolean);
+              const idx = cells.findIndex((t) => normLabel(t) === want);
+              if (idx >= 0 && cells[idx + 1]) return cells[idx + 1];
+            }
+
+            // Non-table pattern: sibling or next element
             const sib = lab.nextElementSibling;
             if (sib && safeText(sib)) return safeText(sib);
 
-            // or look for the next texty element within parent
+            // Fallback: within row container
             const parts = Array.from(row.querySelectorAll("div,span,td"))
               .map(safeText)
               .filter(Boolean);
 
-            const idx = parts.findIndex(t => normLabel(t) === want);
+            const idx = parts.findIndex((t) => normLabel(t) === want);
             if (idx >= 0 && parts[idx + 1]) return parts[idx + 1];
+
+            return "";
+          };
+
+          const propertyType = getByLabel("Property Type");
+          const mlsNumber = getByLabel("MLS Number");
+          const mlsStatus = getByLabel("MLS Status");
+          const statusChangeDate = getByLabel("Status Change Date");
+          const listPrice = getByLabel("List Price");
+          const squareFootage = getByLabel("Square Footage");
+          const daysOnMarket = getByLabel("Days On Market");
+          const listingAgent = getByLabel("Listing Agent");
+          const listingOffice = getByLabel("Listing Office");
+
+          // Beds/Baths appears as "Beds / Baths"
+          const bedsBathsRaw = getByLabel("Beds / Baths");
+          let beds = "", baths = "";
+          if (bedsBathsRaw) {
+            const m = bedsBathsRaw.match(/(\d+)\s*\/\s*(\d+)/);
+            if (m) { beds = m[1]; baths = m[2]; }
           }
-        }
-        return "";
-      };
 
-      const propertyType = getByLabel("Property Type");
-      const mlsNumber = getByLabel("MLS Number");
-      const mlsStatus = getByLabel("MLS Status");
-      const statusChangeDate = getByLabel("Status Change Date");
-      const listPrice = getByLabel("List Price");
-      const squareFootage = getByLabel("Square Footage");
-      const daysOnMarket = getByLabel("Days On Market");
-      const listingAgent = getByLabel("Listing Agent");
-      const listingOffice = getByLabel("Listing Office");
+          // --- Links (Zillow, Google Maps, social) ---
+          const links = Array.from(document.querySelectorAll("a[href]"))
+            .map((a) => a.getAttribute("href"))
+            .filter(Boolean);
 
-      // Beds/Baths appears as "Beds / Baths"
-      const bedsBathsRaw = getByLabel("Beds / Baths");
-      let beds = "", baths = "";
-      if (bedsBathsRaw) {
-        const m = bedsBathsRaw.match(/(\d+)\s*\/\s*(\d+)/);
-        if (m) { beds = m[1]; baths = m[2]; }
+          const firstMatch = (pred) => (links.find(pred) || "");
+
+          const zillowLink = firstMatch((h) => /zillow\.com/i.test(h)) || "";
+          const googleMapsLink =
+            firstMatch((h) => /google\.(com|ca)\/maps/i.test(h)) ||
+            firstMatch((h) => /maps\.google/i.test(h)) ||
+            "";
+
+          const social = {
+            facebook: firstMatch((h) => /facebook\.com/i.test(h)) || "",
+            instagram: firstMatch((h) => /instagram\.com/i.test(h)) || "",
+            linkedin: firstMatch((h) => /linkedin\.com/i.test(h)) || "",
+            twitter: firstMatch((h) => /(twitter\.com|x\.com)/i.test(h)) || "",
+            tiktok: firstMatch((h) => /tiktok\.com/i.test(h)) || "",
+            youtube: firstMatch((h) => /(youtube\.com|youtu\.be)/i.test(h)) || "",
+          };
+
+          return {
+            address,
+            property: {
+              property_type: propertyType || "",
+              mls_number: mlsNumber || "",
+              mls_status: mlsStatus || "",
+              status_change_date: statusChangeDate || "",
+              list_price: listPrice || "",
+              beds: beds || "",
+              baths: baths || "",
+              square_footage: squareFootage || "",
+              days_on_market: daysOnMarket || "",
+              listing_agent: listingAgent || "",
+              listing_office: listingOffice || "",
+              zillow_link: zillowLink || "",
+              google_maps_link: googleMapsLink || "",
+            },
+            social,
+          };
+        });
+
+        // Defaults if anything missing
+        const defaults = {
+          street: "", city: "", state: "", zip: "",
+          property_type: "", mls_number: "", mls_status: "", status_change_date: "",
+          list_price: "", beds: "", baths: "", square_footage: "", days_on_market: "",
+          listing_agent: "", listing_office: "", zillow_link: "", google_maps_link: "",
+          facebook: "", instagram: "", linkedin: "", twitter: "", tiktok: "", youtube: "",
+        };
+
+        const addr = detailData?.address || {};
+        const prop = detailData?.property || {};
+        const soc = detailData?.social || {};
+
+        const computedMaps = prop.google_maps_link || buildGoogleMapsLink(addr);
+
+        Object.assign(
+          lead,
+          defaults,
+          {
+            street: addr.street || "",
+            city: addr.city || "",
+            state: addr.state || "",
+            zip: addr.zip || "",
+
+            property_type: prop.property_type || "",
+            mls_number: prop.mls_number || "",
+            mls_status: prop.mls_status || "",
+            status_change_date: prop.status_change_date || "",
+            list_price: prop.list_price || "",
+            beds: prop.beds || "",
+            baths: prop.baths || "",
+            square_footage: prop.square_footage || "",
+            days_on_market: prop.days_on_market || "",
+            listing_agent: prop.listing_agent || "",
+            listing_office: prop.listing_office || "",
+            zillow_link: prop.zillow_link || "",
+            google_maps_link: computedMaps || "",
+
+            facebook: soc.facebook || "",
+            instagram: soc.instagram || "",
+            linkedin: soc.linkedin || "",
+            twitter: soc.twitter || "",
+            tiktok: soc.tiktok || "",
+            youtube: soc.youtube || "",
+          }
+        );
+
+      } catch (err) {
+        console.error(`⚠️ Detail fetch failed for ${lead.full_name}: ${err.message}`);
+        try { await detailPage.screenshot({ path: `failure_${lead.contact_id}.png`, fullPage: true }); } catch {}
+
+        Object.assign(lead, {
+          street: "", city: "", state: "", zip: "",
+          property_type: "", mls_number: "", mls_status: "", status_change_date: "",
+          list_price: "", beds: "", baths: "", square_footage: "", days_on_market: "",
+          listing_agent: "", listing_office: "", zillow_link: "", google_maps_link: "",
+          facebook: "", instagram: "", linkedin: "", twitter: "", tiktok: "", youtube: "",
+        });
+      } finally {
+        await detailPage.close();
+        await sleep(300);
       }
-
-      // --- Links (Zillow, Google Maps, social) ---
-      const links = Array.from(document.querySelectorAll("a[href]"))
-        .map(a => a.getAttribute("href"))
-        .filter(Boolean);
-
-      const firstMatch = (pred) => (links.find(pred) || "");
-
-      const zillowLink =
-        firstMatch(h => /zillow\.com/i.test(h)) ||
-        firstMatch(h => /\/z\//i.test(h)); // fallback if Vulcan uses redirect paths
-
-      // Sometimes Vulcan has a maps link; if not, we build it later from address.
-      const googleMapsLink =
-        firstMatch(h => /google\.(com|ca)\/maps/i.test(h)) ||
-        firstMatch(h => /maps\.google/i.test(h));
-
-      const social = {
-        facebook: firstMatch(h => /facebook\.com/i.test(h)),
-        instagram: firstMatch(h => /instagram\.com/i.test(h)),
-        linkedin: firstMatch(h => /linkedin\.com/i.test(h)),
-        twitter: firstMatch(h => /(twitter\.com|x\.com)/i.test(h)),
-        tiktok: firstMatch(h => /tiktok\.com/i.test(h)),
-        youtube: firstMatch(h => /(youtube\.com|youtu\.be)/i.test(h))
-      };
-
-      // If the social section has a handle but no link, try to infer Twitter/X
-      if (!social.twitter) {
-        const possibleHandle = Array.from(document.querySelectorAll("div,span,a"))
-          .map(safeText)
-          .find(t => t && t.length >= 3 && t.length <= 30 && /^[A-Za-z0-9_]+$/.test(t));
-        // this is a light heuristic—only used as a fallback
-        if (possibleHandle) social.twitter = `https://twitter.com/${possibleHandle.replace(/^@/, "")}`;
-      }
-
-      return {
-        address,
-        property: {
-          property_type: propertyType || "",
-          mls_number: mlsNumber || "",
-          mls_status: mlsStatus || "",
-          status_change_date: statusChangeDate || "",
-          list_price: listPrice || "",
-          beds: beds || "",
-          baths: baths || "",
-          square_footage: squareFootage || "",
-          days_on_market: daysOnMarket || "",
-          listing_agent: listingAgent || "",
-          listing_office: listingOffice || "",
-          zillow_link: zillowLink || "",
-          google_maps_link: googleMapsLink || ""
-        },
-        social
-      };
-    });
-
-    // Defaults if anything missing
-    const defaults = {
-      street: "", city: "", state: "", zip: "",
-      property_type: "", mls_number: "", mls_status: "", status_change_date: "",
-      list_price: "", beds: "", baths: "", square_footage: "", days_on_market: "",
-      listing_agent: "", listing_office: "", zillow_link: "", google_maps_link: "",
-      facebook: "", instagram: "", linkedin: "", twitter: "", tiktok: "", youtube: ""
-    };
-
-    const addr = detailData?.address || {};
-    const prop = detailData?.property || {};
-    const soc  = detailData?.social || {};
-
-    // Build Google Maps link if Vulcan didn't provide one
-    const computedMaps = prop.google_maps_link || buildGoogleMapsLink(addr);
-
-    Object.assign(
-      lead,
-      defaults,
-      {
-        street: addr.street || "",
-        city: addr.city || "",
-        state: addr.state || "",
-        zip: addr.zip || "",
-
-        property_type: prop.property_type || "",
-        mls_number: prop.mls_number || "",
-        mls_status: prop.mls_status || "",
-        status_change_date: prop.status_change_date || "",
-        list_price: prop.list_price || "",
-        beds: prop.beds || "",
-        baths: prop.baths || "",
-        square_footage: prop.square_footage || "",
-        days_on_market: prop.days_on_market || "",
-        listing_agent: prop.listing_agent || "",
-        listing_office: prop.listing_office || "",
-        zillow_link: prop.zillow_link || "",
-        google_maps_link: computedMaps || "",
-
-        facebook: soc.facebook || "",
-        instagram: soc.instagram || "",
-        linkedin: soc.linkedin || "",
-        twitter: soc.twitter || "",
-        tiktok: soc.tiktok || "",
-        youtube: soc.youtube || ""
-      }
-    );
-
-  } catch (err) {
-    console.error(`⚠️ Detail fetch failed for ${lead.full_name}: ${err.message}`);
-    try { await detailPage.screenshot({ path: `failure_${lead.contact_id}.png`, fullPage: true }); } catch {}
-
-    // Ensure fields exist even on failure
-    Object.assign(lead, {
-      street: "", city: "", state: "", zip: "",
-      property_type: "", mls_number: "", mls_status: "", status_change_date: "",
-      list_price: "", beds: "", baths: "", square_footage: "", days_on_market: "",
-      listing_agent: "", listing_office: "", zillow_link: "", google_maps_link: "",
-      facebook: "", instagram: "", linkedin: "", twitter: "", tiktok: "", youtube: ""
-    });
-  } finally {
-    await detailPage.close();
-    await sleep(300);
-  }
-}
-
+    }
 
     // 📤 Send to Zapier
     for (const lead of unsentLeads) {
       try {
-        await axios.post(WEBHOOK_URL, { timestamp: new Date().toISOString(), lead });
+        await axios.post(WEBHOOK_URL, {
+          version: "v2",
+          timestamp: new Date().toISOString(),
+          lead,
+        });
         console.log(`📤 Sent: ${lead.full_name}`);
       } catch (err) {
         console.error(`❌ Failed to send ${lead.full_name}: ${err.message}`);
@@ -391,13 +494,13 @@ for (const lead of unsentLeads) {
     fs.writeFileSync(CACHE_FILE, JSON.stringify(updatedCache, null, 2));
 
     // 📁 Check/create folder
-    await page.goto(CONTACTS_URL, { waitUntil: "domcontentloaded", timeout: 120000 });
-    await page.waitForSelector("div.contacts-folder-nav-name", { timeout: 120000 });
+    await page.goto(CONTACTS_SHELL_URL, { waitUntil: "domcontentloaded", timeout: 120000 });
+    await sleep(1500);
 
     const normalizedName = folderName.replace(/\s+/g, "-");
     const folderExists = await page.evaluate((dataFolderName) => {
       const folders = [...document.querySelectorAll("div.contacts-folder-nav-name")];
-      return folders.some(f => f.getAttribute("data-folder-name") === dataFolderName);
+      return folders.some((f) => f.getAttribute("data-folder-name") === dataFolderName);
     }, normalizedName);
 
     if (!folderExists) {
@@ -408,16 +511,20 @@ for (const lead of unsentLeads) {
         await page.click("#new_folder_button");
         await page.waitForSelector("#name", { timeout: 120000 });
         await page.type("#name", folderName);
+
         try { await page.select("#placement", "INSIDE"); } catch {}
+
+        // choose parent folder "Off Market" in dropdown
         try {
           await page.click("div[aria-haspopup='listbox']");
           await page.waitForSelector("div[role='option']", { timeout: 10000 });
           await page.evaluate(() => {
             const option = [...document.querySelectorAll("div[role='option']")]
-              .find(el => el.textContent.trim() === "Off Market");
+              .find((el) => el.textContent.trim() === "Off Market");
             option?.click();
           });
         } catch {}
+
         try { await page.select("#layout", "8109"); } catch {}
         try { await page.click("button[type='submit']"); } catch {}
         await sleep(3000);
@@ -429,47 +536,65 @@ for (const lead of unsentLeads) {
     }
 
     // 📂 Move contacts (robust)
-    await page.goto(CONTACTS_URL, { waitUntil: "domcontentloaded", timeout: 120000 });
-    await page.waitForSelector("#master_checkbox", { visible: true, timeout: 120000 });
-    await page.click("#master_checkbox");
+    await page.goto(CONTACTS_SHELL_URL, { waitUntil: "domcontentloaded", timeout: 120000 });
+    await sleep(1500);
+    await clickFolderByName(page, "Off Market");
+    await sleep(1500);
+
+    // master checkbox might vary; keep your original selector but add fallback
+    const masterSelectorCandidates = ["#master_checkbox", "input#master_checkbox", "input[type='checkbox'][id*='master']"];
+    let masterSel = null;
+    for (const sel of masterSelectorCandidates) {
+      if (await page.$(sel)) { masterSel = sel; break; }
+    }
+    if (!masterSel) throw new Error("Could not find master checkbox selector on contacts page.");
+
+    await page.waitForSelector(masterSel, { visible: true, timeout: 120000 });
+    await page.click(masterSel);
     console.log("✅ Selected all contacts via master checkbox.");
 
-    // Click the Move button
-    await page.waitForSelector("#cm_move_button", { visible: true, timeout: 120000 });
-    await page.click("#cm_move_button");
+    // Move button
+    const moveBtnCandidates = ["#cm_move_button", "button#cm_move_button", "button:has-text('Move')"];
+    let moveSel = null;
+    for (const sel of moveBtnCandidates) {
+      if (await page.$(sel)) { moveSel = sel; break; }
+    }
+    if (!moveSel) moveSel = "#cm_move_button";
+
+    await page.waitForSelector(moveSel, { visible: true, timeout: 120000 });
+    await page.click(moveSel);
     await sleep(800);
 
-    // Wait for either the dropdown container OR the folder items to exist
+    // Wait for menu
     const menuShown = await page.waitForFunction(() => {
-      return !!document.querySelector("#cm_move_dropdown") ||
-             document.querySelectorAll("li.move-contacts-folder[title]").length > 0 ||
-             document.querySelectorAll("#cm_move_dropdown li, .dropdown-menu li").length > 0;
+      return (
+        !!document.querySelector("#cm_move_dropdown") ||
+        document.querySelectorAll("li.move-contacts-folder[title]").length > 0 ||
+        document.querySelectorAll("#cm_move_dropdown li, .dropdown-menu li").length > 0
+      );
     }, { timeout: 10000 }).catch(() => false);
 
-    // If not shown, try clicking again once
     if (!menuShown) {
       console.log("↻ Move menu not detected, retrying click…");
-      await page.click("#cm_move_button");
+      await page.click(moveSel);
       await sleep(1200);
     }
 
-    // Log what we see for debugging
     const menuDebug = await page.evaluate(() => ({
       hasDropdown: !!document.querySelector("#cm_move_dropdown"),
       itemsByTitle: document.querySelectorAll("li.move-contacts-folder[title]").length,
-      anyLis: document.querySelectorAll("#cm_move_dropdown li, .dropdown-menu li").length
+      anyLis: document.querySelectorAll("#cm_move_dropdown li, .dropdown-menu li").length,
     }));
     console.log("ℹ️ Move menu debug:", JSON.stringify(menuDebug));
 
-    // Try to click the target folder in a broad way
-    const moveSuccess = await page.evaluate((folderName) => {
+    const moveSuccess = await page.evaluate((targetFolderName) => {
       let items = Array.from(document.querySelectorAll("li.move-contacts-folder[title]"));
       if (!items.length) {
         items = Array.from(document.querySelectorAll("#cm_move_dropdown li, .dropdown-menu li, li"));
       }
       for (const item of items) {
         const title = (item.getAttribute("title") || item.textContent || "").trim();
-        if (title === folderName.trim()) {
+        if (title === targetFolderName.trim()) {
           const link = item.querySelector("a.move-to-folder") || item.querySelector("a, .dropdown-item, button");
           if (link) { link.click(); return true; }
         }
@@ -477,7 +602,7 @@ for (const lead of unsentLeads) {
       return false;
     }, folderName);
 
-    // Confirm modal if it appears
+    // Confirm modal
     try {
       await page.waitForSelector("#bulk_actions_modal button.btn.btn-primary", { visible: true, timeout: 5000 });
       await page.click("#bulk_actions_modal button.btn.btn-primary");
