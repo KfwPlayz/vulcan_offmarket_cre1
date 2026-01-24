@@ -24,6 +24,12 @@ const monday = new Date(today);
 monday.setDate(today.getDate() + offset);
 const folderName = `Expired Leads Week of ${monday.getMonth() + 1}.${monday.getDate()}`;
 
+function buildGoogleMapsLink({ street, city, state, zip }) {
+  const parts = [street, city, state, zip].filter(Boolean).join(", ");
+  if (!parts.trim()) return "";
+  return `https://www.google.com/maps/search/?api=1&query=${encodeURIComponent(parts)}`;
+}
+
 (async () => {
   const browser = await puppeteer.launch({
     headless: "new",
@@ -145,38 +151,230 @@ const folderName = `Expired Leads Week of ${monday.getMonth() + 1}.${monday.getD
       }
     }
 
-    // 🔍 Visit each contact detail page to fetch address info
-    for (const lead of unsentLeads) {
-      const detailPage = await browser.newPage();
-      try {
-        const detailUrl = `https://www.vulcan7dialer.com/cm/index#contact/${lead.contact_id}`;
-        await detailPage.goto(detailUrl, { waitUntil: "domcontentloaded", timeout: 120000 });
-        await detailPage.waitForSelector('a[data-type="address"]', { timeout: 10000 });
+    // 🔍 Visit each contact detail page to fetch address + extra property/social info
+for (const lead of unsentLeads) {
+  const detailPage = await browser.newPage();
+  try {
+    const detailUrl = `https://www.vulcan7dialer.com/cm/index#contact/${lead.contact_id}`;
+    await detailPage.goto(detailUrl, { waitUntil: "domcontentloaded", timeout: 120000 });
 
-        const address = await detailPage.evaluate(() => {
-          const el = document.querySelector('a[data-type="address"]');
-          if (!el) return {};
-          try {
-            const data = JSON.parse(el.getAttribute("data-value") || "{}");
-            return {
-              street: data.address || "",
-              city: data.city || "",
-              state: data.state || "",
-              zip: data.zip || ""
-            };
-          } catch { return {}; }
-        });
+    // Address is usually present, but don't hard-fail if it isn't.
+    await detailPage.waitForSelector("body", { timeout: 120000 });
+    await sleep(800);
 
-        Object.assign(lead, { street: "", city: "", state: "", zip: "" }, address);
-      } catch (err) {
-        console.error(`⚠️ Address fetch failed for ${lead.full_name}: ${err.message}`);
-        try { await detailPage.screenshot({ path: `failure_${lead.contact_id}.png`, fullPage: true }); } catch {}
-        Object.assign(lead, { street: "", city: "", state: "", zip: "" });
-      } finally {
-        await detailPage.close();
-        await sleep(300);
+    const detailData = await detailPage.evaluate(() => {
+      const safeText = (el) => (el?.textContent || "").replace(/\s+/g, " ").trim();
+
+      // --- Address (your existing method) ---
+      let address = { street: "", city: "", state: "", zip: "" };
+      const addrEl = document.querySelector('a[data-type="address"]');
+      if (addrEl) {
+        try {
+          const data = JSON.parse(addrEl.getAttribute("data-value") || "{}");
+          address = {
+            street: data.address || "",
+            city: data.city || "",
+            state: data.state || "",
+            zip: data.zip || ""
+          };
+        } catch {}
       }
-    }
+
+      // --- Residential Property block (label -> value) ---
+      // Find the section by its header text
+      const headers = Array.from(document.querySelectorAll("h1,h2,h3,h4,div,span"))
+        .filter(el => safeText(el).toLowerCase() === "residential property");
+
+      // Take the closest container that likely holds the table/rows
+      const rpHeader = headers[0] || null;
+      const rpRoot =
+        rpHeader?.closest("div")?.parentElement ||
+        rpHeader?.closest("section") ||
+        rpHeader?.closest("div") ||
+        document;
+
+      const normLabel = (s) =>
+        (s || "")
+          .toLowerCase()
+          .replace(/\s+/g, " ")
+          .replace(/:$/, "")
+          .trim();
+
+      // Looks for an element whose text is the label, then reads the next “cell”
+      const getByLabel = (label) => {
+        const want = normLabel(label);
+        const candidates = Array.from(rpRoot.querySelectorAll("div,span,td,th,strong,b"))
+          .filter(el => normLabel(safeText(el)) === want);
+
+        const lab = candidates[0];
+        if (!lab) return "";
+
+        // Common patterns: label cell then value cell (same row / next sibling)
+        const row = lab.closest("tr") || lab.parentElement;
+        if (row) {
+          // if table row, pick the next cell
+          if (row.tagName?.toLowerCase() === "tr") {
+            const cells = Array.from(row.querySelectorAll("td,th,div,span")).map(safeText).filter(Boolean);
+            // usually [Label, Value] or [Label, Value, Label, Value]
+            // find the label index and return the next token if present
+            const idx = cells.findIndex(t => normLabel(t) === want);
+            if (idx >= 0 && cells[idx + 1]) return cells[idx + 1];
+          } else {
+            // non-table layout: try nextElementSibling
+            const sib = lab.nextElementSibling;
+            if (sib && safeText(sib)) return safeText(sib);
+
+            // or look for the next texty element within parent
+            const parts = Array.from(row.querySelectorAll("div,span,td"))
+              .map(safeText)
+              .filter(Boolean);
+
+            const idx = parts.findIndex(t => normLabel(t) === want);
+            if (idx >= 0 && parts[idx + 1]) return parts[idx + 1];
+          }
+        }
+        return "";
+      };
+
+      const propertyType = getByLabel("Property Type");
+      const mlsNumber = getByLabel("MLS Number");
+      const mlsStatus = getByLabel("MLS Status");
+      const statusChangeDate = getByLabel("Status Change Date");
+      const listPrice = getByLabel("List Price");
+      const squareFootage = getByLabel("Square Footage");
+      const daysOnMarket = getByLabel("Days On Market");
+      const listingAgent = getByLabel("Listing Agent");
+      const listingOffice = getByLabel("Listing Office");
+
+      // Beds/Baths appears as "Beds / Baths"
+      const bedsBathsRaw = getByLabel("Beds / Baths");
+      let beds = "", baths = "";
+      if (bedsBathsRaw) {
+        const m = bedsBathsRaw.match(/(\d+)\s*\/\s*(\d+)/);
+        if (m) { beds = m[1]; baths = m[2]; }
+      }
+
+      // --- Links (Zillow, Google Maps, social) ---
+      const links = Array.from(document.querySelectorAll("a[href]"))
+        .map(a => a.getAttribute("href"))
+        .filter(Boolean);
+
+      const firstMatch = (pred) => (links.find(pred) || "");
+
+      const zillowLink =
+        firstMatch(h => /zillow\.com/i.test(h)) ||
+        firstMatch(h => /\/z\//i.test(h)); // fallback if Vulcan uses redirect paths
+
+      // Sometimes Vulcan has a maps link; if not, we build it later from address.
+      const googleMapsLink =
+        firstMatch(h => /google\.(com|ca)\/maps/i.test(h)) ||
+        firstMatch(h => /maps\.google/i.test(h));
+
+      const social = {
+        facebook: firstMatch(h => /facebook\.com/i.test(h)),
+        instagram: firstMatch(h => /instagram\.com/i.test(h)),
+        linkedin: firstMatch(h => /linkedin\.com/i.test(h)),
+        twitter: firstMatch(h => /(twitter\.com|x\.com)/i.test(h)),
+        tiktok: firstMatch(h => /tiktok\.com/i.test(h)),
+        youtube: firstMatch(h => /(youtube\.com|youtu\.be)/i.test(h))
+      };
+
+      // If the social section has a handle but no link, try to infer Twitter/X
+      if (!social.twitter) {
+        const possibleHandle = Array.from(document.querySelectorAll("div,span,a"))
+          .map(safeText)
+          .find(t => t && t.length >= 3 && t.length <= 30 && /^[A-Za-z0-9_]+$/.test(t));
+        // this is a light heuristic—only used as a fallback
+        if (possibleHandle) social.twitter = `https://twitter.com/${possibleHandle.replace(/^@/, "")}`;
+      }
+
+      return {
+        address,
+        property: {
+          property_type: propertyType || "",
+          mls_number: mlsNumber || "",
+          mls_status: mlsStatus || "",
+          status_change_date: statusChangeDate || "",
+          list_price: listPrice || "",
+          beds: beds || "",
+          baths: baths || "",
+          square_footage: squareFootage || "",
+          days_on_market: daysOnMarket || "",
+          listing_agent: listingAgent || "",
+          listing_office: listingOffice || "",
+          zillow_link: zillowLink || "",
+          google_maps_link: googleMapsLink || ""
+        },
+        social
+      };
+    });
+
+    // Defaults if anything missing
+    const defaults = {
+      street: "", city: "", state: "", zip: "",
+      property_type: "", mls_number: "", mls_status: "", status_change_date: "",
+      list_price: "", beds: "", baths: "", square_footage: "", days_on_market: "",
+      listing_agent: "", listing_office: "", zillow_link: "", google_maps_link: "",
+      facebook: "", instagram: "", linkedin: "", twitter: "", tiktok: "", youtube: ""
+    };
+
+    const addr = detailData?.address || {};
+    const prop = detailData?.property || {};
+    const soc  = detailData?.social || {};
+
+    // Build Google Maps link if Vulcan didn't provide one
+    const computedMaps = prop.google_maps_link || buildGoogleMapsLink(addr);
+
+    Object.assign(
+      lead,
+      defaults,
+      {
+        street: addr.street || "",
+        city: addr.city || "",
+        state: addr.state || "",
+        zip: addr.zip || "",
+
+        property_type: prop.property_type || "",
+        mls_number: prop.mls_number || "",
+        mls_status: prop.mls_status || "",
+        status_change_date: prop.status_change_date || "",
+        list_price: prop.list_price || "",
+        beds: prop.beds || "",
+        baths: prop.baths || "",
+        square_footage: prop.square_footage || "",
+        days_on_market: prop.days_on_market || "",
+        listing_agent: prop.listing_agent || "",
+        listing_office: prop.listing_office || "",
+        zillow_link: prop.zillow_link || "",
+        google_maps_link: computedMaps || "",
+
+        facebook: soc.facebook || "",
+        instagram: soc.instagram || "",
+        linkedin: soc.linkedin || "",
+        twitter: soc.twitter || "",
+        tiktok: soc.tiktok || "",
+        youtube: soc.youtube || ""
+      }
+    );
+
+  } catch (err) {
+    console.error(`⚠️ Detail fetch failed for ${lead.full_name}: ${err.message}`);
+    try { await detailPage.screenshot({ path: `failure_${lead.contact_id}.png`, fullPage: true }); } catch {}
+
+    // Ensure fields exist even on failure
+    Object.assign(lead, {
+      street: "", city: "", state: "", zip: "",
+      property_type: "", mls_number: "", mls_status: "", status_change_date: "",
+      list_price: "", beds: "", baths: "", square_footage: "", days_on_market: "",
+      listing_agent: "", listing_office: "", zillow_link: "", google_maps_link: "",
+      facebook: "", instagram: "", linkedin: "", twitter: "", tiktok: "", youtube: ""
+    });
+  } finally {
+    await detailPage.close();
+    await sleep(300);
+  }
+}
+
 
     // 📤 Send to Zapier
     for (const lead of unsentLeads) {
