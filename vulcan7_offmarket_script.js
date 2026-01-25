@@ -1,3 +1,5 @@
+// vulcan7_offmarket_script.js
+
 // 📌 Required Libraries
 const puppeteer = require("puppeteer");
 const axios = require("axios");
@@ -60,6 +62,7 @@ async function clickFolderByName(page, name) {
 }
 
 (async () => {
+  // ✅ KEEP YOUR EXISTING PUPPETEER SETUP (unchanged)
   const browser = await puppeteer.launch({
     headless: "new",
     executablePath: process.env.PUPPETEER_EXECUTABLE_PATH || "/usr/bin/chromium-browser",
@@ -92,9 +95,7 @@ async function clickFolderByName(page, name) {
 
   page.on("console", (msg) => console.log("[BROWSER]", msg.type(), msg.text()));
   page.on("pageerror", (err) => console.log("[PAGEERROR]", err));
-  page.on("requestfailed", (req) =>
-    console.log("[REQ FAILED]", req.url(), req.failure()?.errorText)
-  );
+  page.on("requestfailed", (req) => console.log("[REQ FAILED]", req.url(), req.failure()?.errorText));
   // === end CI hardening ===
 
   try {
@@ -140,7 +141,7 @@ async function clickFolderByName(page, name) {
     await clickFolderByName(page, "Off Market");
     await sleep(2000);
 
-    // ✅ Wait for a grid signal OR a no-results state (handles layout differences)
+    // ✅ Wait for a grid signal OR a no-results state
     await page.waitForFunction(() => {
       const hasOldRows = document.querySelectorAll("tr[data-itemid]").length > 0;
 
@@ -164,12 +165,8 @@ async function clickFolderByName(page, name) {
     const leads = await page.evaluate(() => {
       const safeText = (el) => (el?.textContent || "").replace(/\s+/g, " ").trim();
 
-      // Prefer: old table rows
       let nodes = Array.from(document.querySelectorAll("tr[data-itemid]"));
-      if (!nodes.length) {
-        // Fallback: anything with data-itemid
-        nodes = Array.from(document.querySelectorAll("[data-itemid]"));
-      }
+      if (!nodes.length) nodes = Array.from(document.querySelectorAll("[data-itemid]"));
 
       const results = [];
 
@@ -177,10 +174,8 @@ async function clickFolderByName(page, name) {
         const id = node.getAttribute("data-itemid");
         if (!id) continue;
 
-        // Name link: old layout uses .contact-details-link a
         let nameEl = node.querySelector(".contact-details-link a");
         if (!nameEl) {
-          // fallback: any link that points to #contact/{id} or has contact in hash
           nameEl =
             node.querySelector(`a[href*="#contact/${id}"]`) ||
             node.querySelector(`a[href*="#contact/"]`) ||
@@ -190,14 +185,12 @@ async function clickFolderByName(page, name) {
         const fullName = safeText(nameEl);
         if (!fullName) continue;
 
-        // Phone & email in old layout are in cell-example-* ids
         const phoneDiv = document.querySelector(`div[id='cell-example-${id}-143332']`);
         const phone = safeText(phoneDiv) || "";
 
         const emailEl = document.querySelector(`div[id='cell-example-${id}-143333'] a[href^='mailto:']`);
         const email = (emailEl?.getAttribute("href") || "").replace("mailto:", "").trim();
 
-        // Fallback: try to find phone/email within node text
         let phone2 = phone;
         if (!phone2) {
           const text = safeText(node);
@@ -272,7 +265,6 @@ async function clickFolderByName(page, name) {
         await detailPage.waitForSelector("body", { timeout: 120000 });
         await sleep(1200);
 
-        // Optional: wait for the Residential Property section to appear (if it exists)
         await detailPage.waitForFunction(() => {
           const txt = (document.body?.innerText || "").toLowerCase();
           return txt.includes("residential property") || txt.includes("contact information");
@@ -281,7 +273,7 @@ async function clickFolderByName(page, name) {
         const detailData = await detailPage.evaluate(() => {
           const safeText = (el) => (el?.textContent || "").replace(/\s+/g, " ").trim();
 
-          // --- Address (Vulcan stores JSON in a[data-type="address"]) ---
+          // Address
           let address = { street: "", city: "", state: "", zip: "" };
           const addrEl = document.querySelector('a[data-type="address"]');
           if (addrEl) {
@@ -296,7 +288,7 @@ async function clickFolderByName(page, name) {
             } catch {}
           }
 
-          // --- Residential Property block (label -> value) ---
+          // Residential Property label -> value
           const normLabel = (s) =>
             (s || "")
               .toLowerCase()
@@ -304,7 +296,6 @@ async function clickFolderByName(page, name) {
               .replace(/:$/, "")
               .trim();
 
-          // Find a container likely holding the property table
           const all = Array.from(document.querySelectorAll("*"));
           const rpHeader = all.find((el) => safeText(el).toLowerCase() === "residential property") || null;
           const rpRoot =
@@ -356,7 +347,6 @@ async function clickFolderByName(page, name) {
           const listingAgent = getByLabel("Listing Agent");
           const listingOffice = getByLabel("Listing Office");
 
-          // Beds/Baths appears as "Beds / Baths"
           const bedsBathsRaw = getByLabel("Beds / Baths");
           let beds = "", baths = "";
           if (bedsBathsRaw) {
@@ -364,7 +354,7 @@ async function clickFolderByName(page, name) {
             if (m) { beds = m[1]; baths = m[2]; }
           }
 
-          // --- Links (Zillow, Google Maps, social) ---
+          // Links (Zillow, Google Maps, Social)
           const links = Array.from(document.querySelectorAll("a[href]"))
             .map((a) => a.getAttribute("href"))
             .filter(Boolean);
@@ -510,7 +500,6 @@ async function clickFolderByName(page, name) {
 
         try { await page.select("#placement", "INSIDE"); } catch {}
 
-        // choose parent folder "Off Market" in dropdown
         try {
           await page.click("div[aria-haspopup='listbox']");
           await page.waitForSelector("div[role='option']", { timeout: 10000 });
@@ -537,35 +526,16 @@ async function clickFolderByName(page, name) {
     await clickFolderByName(page, "Off Market");
     await sleep(1500);
 
-    // master checkbox selector (with fallback candidates)
-    const masterSelectorCandidates = [
-      "#master_checkbox",
-      "input#master_checkbox",
-      "input[type='checkbox'][id*='master']",
-    ];
-    let masterSel = null;
-    for (const sel of masterSelectorCandidates) {
-      if (await page.$(sel)) { masterSel = sel; break; }
-    }
-    if (!masterSel) throw new Error("Could not find master checkbox selector on contacts page.");
-
-    await page.waitForSelector(masterSel, { visible: true, timeout: 120000 });
-    await page.click(masterSel);
+    // Select all
+    await page.waitForSelector("#master_checkbox", { visible: true, timeout: 120000 });
+    await page.click("#master_checkbox");
     console.log("✅ Selected all contacts via master checkbox.");
 
-    // Move button selector candidates (Puppeteer only; no Playwright selectors)
-    const moveBtnCandidates = ["#cm_move_button", "button#cm_move_button"];
-    let moveSel = null;
-    for (const sel of moveBtnCandidates) {
-      if (await page.$(sel)) { moveSel = sel; break; }
-    }
-    if (!moveSel) moveSel = "#cm_move_button";
-
-    await page.waitForSelector(moveSel, { visible: true, timeout: 120000 });
-    await page.click(moveSel);
+    // Move dropdown
+    await page.waitForSelector("#cm_move_button", { visible: true, timeout: 120000 });
+    await page.click("#cm_move_button");
     await sleep(800);
 
-    // Wait for menu
     const menuShown = await page.waitForFunction(() => {
       return (
         !!document.querySelector("#cm_move_dropdown") ||
@@ -576,7 +546,7 @@ async function clickFolderByName(page, name) {
 
     if (!menuShown) {
       console.log("↻ Move menu not detected, retrying click…");
-      await page.click(moveSel);
+      await page.click("#cm_move_button");
       await sleep(1200);
     }
 
@@ -587,30 +557,26 @@ async function clickFolderByName(page, name) {
     }));
     console.log("ℹ️ Move menu debug:", JSON.stringify(menuDebug));
 
-    // ✅ Click the target folder WITHOUT scanning hundreds of nodes in a big loop
+    // ✅ Click target folder without scanning hundreds of nodes
     let moveSuccess = false;
-
     const safeFolderName = folderName.replace(/"/g, '\\"');
     const targetLinkSel = `li.move-contacts-folder[title="${safeFolderName}"] a.move-to-folder`;
 
-    // Try direct click (fast)
     const directHandle = await page.$(targetLinkSel);
     if (directHandle) {
       await directHandle.click();
       moveSuccess = true;
     } else {
-      // Fallback: narrow search to dropdown only (still small)
       moveSuccess = await page.evaluate((fn) => {
         const dropdown = document.querySelector("#cm_move_dropdown") || document;
         const items = Array.from(dropdown.querySelectorAll("li.move-contacts-folder[title]"));
-        const match = items.find(li => (li.getAttribute("title") || "").trim() === fn.trim());
+        const match = items.find((li) => (li.getAttribute("title") || "").trim() === fn.trim());
         const link = match?.querySelector("a.move-to-folder, a, button");
         if (link) { link.click(); return true; }
         return false;
       }, folderName);
     }
 
-    // Sometimes overlays interfere; closing dropdown can help
     try { await page.keyboard.press("Escape"); } catch {}
 
     // Confirm modal if it appears
