@@ -9,7 +9,7 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
 // 🔐 Credentials and Constants
 const LOGIN_URL = "https://www.vulcan7dialer.com/login";
-const CONTACTS_URL = "https://www.vulcan7dialer.com/cm/index";
+const CONTACTS_URL = "https://www.vulcan7dialer.com/cm/index#params/dmlld19pZD05ODEzOCZwYWdlPTE=";
 const FOLDER_URL = "https://www.vulcan7dialer.com/cm/folders/index";
 
 const EMAIL = process.env.EMAIL;
@@ -64,25 +64,24 @@ function buildGoogleMapsLink({ address, city, state, zip }) {
 
     if (page.url().includes("/login")) throw new Error("Login failed");
 
-    // Go to Contacts page
+    // Navigate to Contacts page + wait
     await page.goto(CONTACTS_URL, { waitUntil: "networkidle2" });
     await sleep(2000);
 
-    // 🗂 Click the "Off Market" folder manually
+    // ✅ Visually click and confirm the Off Market folder is selected
     await page.evaluate(() => {
       const folders = Array.from(document.querySelectorAll("div.contacts-folder-nav-name"));
       const target = folders.find(el => el.textContent.trim().toLowerCase() === "off market");
       if (target) target.click();
     });
-    await sleep(2000);
 
+    // 🟡 Wait for folder to populate
     await page.waitForFunction(() => {
-      const items = document.querySelectorAll("[data-itemid]");
-      return items.length > 0;
+      const folderLabel = document.querySelector(".contacts-folder-title span");
+      return folderLabel && folderLabel.textContent.toLowerCase().includes("off market");
     }, { timeout: 15000 });
 
-    const testCount = await page.evaluate(() => document.querySelectorAll("[data-itemid]").length);
-    console.log("✅ Found leads:", testCount);
+    await page.waitForSelector("[data-itemid] a[href*='contact_id=']", { timeout: 15000 });
 
     const contactLinks = await page.evaluate(() => {
       return Array.from(document.querySelectorAll("[data-itemid] a[href*='contact_id=']")).map(a => ({
@@ -90,6 +89,8 @@ function buildGoogleMapsLink({ address, city, state, zip }) {
         id: a.closest("[data-itemid]").getAttribute("data-itemid")
       }));
     });
+
+    console.log("✅ Found leads:", contactLinks.length);
 
     const cache = fs.existsSync(CACHE_FILE) ? new Set(JSON.parse(fs.readFileSync(CACHE_FILE, "utf-8"))) : new Set();
     const seen = new Set();
@@ -157,7 +158,7 @@ function buildGoogleMapsLink({ address, city, state, zip }) {
 
     fs.writeFileSync(CACHE_FILE, JSON.stringify([...cache, ...seen], null, 2));
 
-    // Create folder if not exists
+    // Create folder if needed
     await page.goto(FOLDER_URL);
     await page.waitForSelector("#new_folder_button");
     await page.click("#new_folder_button");
@@ -167,40 +168,41 @@ function buildGoogleMapsLink({ address, city, state, zip }) {
     await page.click('button[type="submit"]').catch(() => {});
     await sleep(3000);
 
-    // Move contacts to the new folder
+    // Move contacts
     await page.goto(CONTACTS_URL);
     await sleep(2000);
+
     await page.evaluate(() => {
       const folders = Array.from(document.querySelectorAll("div.contacts-folder-nav-name"));
       const target = folders.find(el => el.textContent.trim().toLowerCase() === "off market");
       if (target) target.click();
     });
-    await sleep(2000);
-    await page.waitForSelector("#master_checkbox");
-    await page.click("#master_checkbox");
-    await sleep(1000);
-    await page.click("#cm_move_button");
-    await sleep(1000);
 
-    const moveSel = `li.move-contacts-folder[title="${folderName}"] a.move-to-folder`;
-    const target = await page.$(moveSel);
+    await page.waitForSelector("#master_checkbox", { timeout: 10000 });
+    const box = await page.$("#master_checkbox");
 
-    if (target) {
-      const box = await target.boundingBox();
-      if (box) {
-        await target.click();
-        console.log("✅ Moved contacts to:", folderName);
+    if (box) {
+      await box.click();
+      await sleep(1000);
+      await page.click("#cm_move_button");
+      await sleep(1000);
+
+      const moveSel = `li.move-contacts-folder[title="${folderName}"] a.move-to-folder`;
+      const moveTarget = await page.$(moveSel);
+
+      if (moveTarget) {
+        const box = await moveTarget.boundingBox();
+        if (box) {
+          await moveTarget.click();
+          console.log("✅ Moved contacts to:", folderName);
+        } else {
+          console.warn("⚠️ Move target found but not clickable.");
+        }
       } else {
-        console.warn("⚠️ Move target found but not clickable.");
+        console.warn("⚠️ Could not find folder to move contacts.");
       }
     } else {
-      const folderTitles = await page.evaluate(() =>
-        Array.from(document.querySelectorAll("li.move-contacts-folder")).map(li =>
-          li.getAttribute("title")
-        )
-      );
-      console.warn("⚠️ Could not find folder to move contacts.");
-      console.log("📂 Available folder titles:", folderTitles);
+      console.warn("⚠️ Master checkbox not found.");
     }
 
   } catch (err) {
