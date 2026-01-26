@@ -1,35 +1,31 @@
-// 📌 Required Libraries
-const puppeteer = require("puppeteer-core");
+const puppeteer = require("puppeteer");
 const axios = require("axios");
 const fs = require("fs");
 const path = require("path");
 
-// 📁 Constants
+const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+
 const LOGIN_URL = "https://www.vulcan7dialer.com/login";
-const CONTACTS_SHELL_URL = "https://www.vulcan7dialer.com/cm/index#params/dmlld19pZD05ODEzOCZwYWdlPTE=";
+const CONTACTS_URL = "https://www.vulcan7dialer.com/cm/index#contacts";
 const FOLDER_URL = "https://www.vulcan7dialer.com/cm/folders/index";
+
 const EMAIL = process.env.EMAIL;
 const PASSWORD = process.env.PASSWORD;
 const WEBHOOK_URL = process.env.WEBHOOK_URL;
 const EXEC_PATH = process.env.PUPPETEER_EXECUTABLE_PATH || "/usr/bin/chromium-browser";
 const CACHE_FILE = path.join(__dirname, "sent-leads-cache-offmarket.json");
 
-// 🗓️ Create folder name
 const today = new Date();
 const offset = today.getDay() === 0 ? -6 : 1 - today.getDay();
 const monday = new Date(today.setDate(today.getDate() + offset));
 const folderName = `Expired Leads Week of ${monday.getMonth() + 1}.${monday.getDate()}`;
 
-// Helper
-const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
-const safeText = (el) => (el?.textContent || "").replace(/\s+/g, " ").trim();
 const buildGoogleMapsLink = ({ street, city, state, zip }) => {
   const parts = [street, city, state, zip].filter(Boolean).join(", ");
   return parts ? `https://www.google.com/maps/search/?api=1&query=${encodeURIComponent(parts)}` : "";
 };
 
-// 🗂 Folder clicking utility
-async function clickFolderByName(page, name) {
+const clickFolderByName = async (page, name) => {
   const lower = name.trim().toLowerCase();
   await page.waitForFunction(
     (name) =>
@@ -50,37 +46,28 @@ async function clickFolderByName(page, name) {
     return false;
   }, lower);
   if (!clicked) throw new Error(`Folder "${name}" not found`);
-}
+};
 
 (async () => {
   const browser = await puppeteer.launch({
     headless: "new",
     executablePath: EXEC_PATH,
-    args: [
-      "--no-sandbox",
-      "--disable-setuid-sandbox",
-      "--disable-dev-shm-usage",
-      "--disable-gpu",
-      "--single-process",
-    ],
+    args: ["--no-sandbox", "--disable-setuid-sandbox", "--disable-dev-shm-usage", "--disable-gpu", "--single-process"],
   });
 
   const page = await browser.newPage();
   page.setDefaultTimeout(120000);
-  page.setDefaultNavigationTimeout(120000);
   await page.setUserAgent("Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 Chrome/123 Safari/537.36");
-
+  await page.setViewport({ width: 1366, height: 768 });
   await page.setRequestInterception(true);
   page.on("request", (req) => {
-    const type = req.resourceType();
-    if (["image", "font", "media"].includes(type)) req.abort();
+    if (["image", "font", "media"].includes(req.resourceType())) req.abort();
     else req.continue();
   });
 
   try {
     if (!EMAIL || !PASSWORD || !WEBHOOK_URL) throw new Error("Missing EMAIL, PASSWORD, or WEBHOOK_URL");
 
-    // 🔐 Login
     await page.goto(LOGIN_URL);
     await page.waitForSelector('input[name="email"], #email, input[name="username"]');
     await page.waitForSelector('input[name="password"], #password');
@@ -101,71 +88,66 @@ async function clickFolderByName(page, name) {
 
     if (page.url().includes("/login")) throw new Error("Login failed");
 
-    // 📂 Navigate to Off Market
-    await page.goto(CONTACTS_SHELL_URL);
-    await sleep(2500);
+    await page.goto(CONTACTS_URL);
+    await sleep(1500);
     await clickFolderByName(page, "Off Market");
-    await sleep(2500);
+    await sleep(2000);
 
     await page.waitForFunction(() => {
       const body = (document.body.innerText || "").toLowerCase();
       return document.querySelectorAll("[data-itemid]").length > 0 || body.includes("no contacts");
     });
 
-    // 🧠 Scrape expanded lead data
-    const nodes = await page.$$("[data-itemid]");
+    const contactLinks = await page.$$eval("[data-itemid] a", (links) =>
+      links.map((el) => ({ id: el.closest("[data-itemid]").getAttribute("data-itemid"), href: el.href }))
+    );
+
     const leads = [];
 
-    for (const node of nodes) {
-      try {
-        const id = await (await node.getProperty("dataset")).jsonValue().then((d) => d.itemid);
-        const link = await node.$("a");
-        await link.click();
-        await page.waitForSelector(".contact-details");
-        await sleep(1000);
+    for (const { id, href } of contactLinks) {
+      await page.goto(href);
+      await page.waitForSelector("body");
 
-        const lead = await page.evaluate(() => {
-          const grab = (sel) => document.querySelector(sel)?.textContent?.trim() || "";
-          const grabInput = (sel) => document.querySelector(sel)?.value?.trim() || "";
-          return {
-            full_name: grab("h3.contact-name") || "Unknown",
-            phone: grab(".contact-phone") || "",
-            email: grab("a[href^='mailto:']")?.replace("mailto:", "") || "",
-            address: grabInput("input[name='street']"),
-            city: grabInput("input[name='city']"),
-            state: grabInput("input[name='state']"),
-            zip: grabInput("input[name='zip']"),
-            property_type: grab("td:contains('Property Type') + td"),
-            mls_number: grab("td:contains('MLS Number') + td"),
-            mls_status: grab("td:contains('MLS Status') + td"),
-            status_change_date: grab("td:contains('Status Change Date') + td"),
-            list_price: grab("td:contains('List Price') + td"),
-            beds: grab("td:contains('Beds') + td"),
-            baths: grab("td:contains('Baths') + td"),
-            sqft: grab("td:contains('Sq Ft') + td"),
-            dom: grab("td:contains('DOM') + td"),
-            listing_agent: grab("td:contains('Listing Agent') + td"),
-            listing_office: grab("td:contains('Listing Office') + td"),
-            zillow: document.querySelector("a[href*='zillow.com']")?.href || "",
-          };
-        });
+      const lead = await page.evaluate(() => {
+        const getText = (sel) => document.querySelector(sel)?.textContent?.trim() || "";
+        const getInputValue = (sel) => document.querySelector(sel)?.value?.trim() || "";
+        const getLinkHref = (sel) => document.querySelector(sel)?.href || "";
 
-        lead.google_maps = buildGoogleMapsLink(lead);
-        const parts = lead.full_name.split(" ");
-        lead.first_name = parts[0];
-        lead.last_name = parts.slice(1).join(" ");
+        return {
+          full_name: getText("h3.contact-name"),
+          phone: getText(".phone-numbers li span") || "",
+          email: getText(".email-addresses li span") || "",
+          address: getText(".address-block .street") || "",
+          city: getText(".address-block .city") || "",
+          state: getText(".address-block .state") || "",
+          zip: getText(".address-block .zip") || "",
+          property_type: getText("td.propertyType") || "",
+          mls_number: getText("td.mlsNumber") || "",
+          mls_status: getText("td.status") || "",
+          status_change_date: getText("td.statusChangeDate") || "",
+          list_price: getText("td.listPrice") || "",
+          beds: getText("td.beds") || "",
+          baths: getText("td.baths") || "",
+          sqft: getText("td.squareFootage") || "",
+          days_on_market: getText("td.daysOnMarket") || "",
+          listing_agent: getText("td.agentName") || "",
+          listing_office: getText("td.officeName") || "",
+          zillow_link: getLinkHref("a[href*='zillow.com']"),
+          maps_link: getLinkHref("a[href*='maps.google.com']") || "",
+        };
+      });
 
-        leads.push(lead);
-        await page.goBack();
-        await sleep(1000);
-      } catch (e) {
-        console.warn("Failed scraping a lead:", e.message);
-      }
+      const parts = (lead.full_name || "").split(" ");
+      lead.first_name = parts[0] || "";
+      lead.last_name = parts.slice(1).join(" ");
+      lead.google_maps_fallback = buildGoogleMapsLink(lead);
+
+      leads.push(lead);
+      await sleep(300);
     }
 
     console.log("✅ Found leads:", leads.length);
 
-    // 📦 De-duplicate + Send to Zapier
     const cache = fs.existsSync(CACHE_FILE)
       ? new Set(JSON.parse(fs.readFileSync(CACHE_FILE, "utf-8")))
       : new Set();
@@ -195,7 +177,6 @@ async function clickFolderByName(page, name) {
 
     fs.writeFileSync(CACHE_FILE, JSON.stringify([...cache, ...[...seen]], null, 2));
 
-    // 📁 Create folder if needed
     await page.goto(FOLDER_URL);
     await page.waitForSelector("#new_folder_button");
     await page.click("#new_folder_button");
@@ -205,10 +186,9 @@ async function clickFolderByName(page, name) {
     await page.click('button[type="submit"]').catch(() => {});
     await sleep(3000);
 
-    // 🔁 Move leads to folder
-    await page.goto(CONTACTS_SHELL_URL);
+    await page.goto(CONTACTS_URL);
     await clickFolderByName(page, "Off Market");
-    await sleep(2500);
+    await sleep(1500);
 
     await page.click("#master_checkbox");
     await sleep(1000);
