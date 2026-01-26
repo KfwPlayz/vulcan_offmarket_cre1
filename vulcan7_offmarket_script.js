@@ -1,10 +1,13 @@
+// 📌 Required Libraries
 const puppeteer = require("puppeteer");
 const axios = require("axios");
 const fs = require("fs");
 const path = require("path");
 
+// Helper
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
+// 🔐 Credentials and Constants
 const LOGIN_URL = "https://www.vulcan7dialer.com/login";
 const CONTACTS_URL = "https://www.vulcan7dialer.com/cm/index#contacts";
 const FOLDER_URL = "https://www.vulcan7dialer.com/cm/folders/index";
@@ -13,40 +16,20 @@ const EMAIL = process.env.EMAIL;
 const PASSWORD = process.env.PASSWORD;
 const WEBHOOK_URL = process.env.WEBHOOK_URL;
 const EXEC_PATH = process.env.PUPPETEER_EXECUTABLE_PATH || "/usr/bin/chromium-browser";
+
 const CACHE_FILE = path.join(__dirname, "sent-leads-cache-offmarket.json");
 
+// 📅 Folder name
 const today = new Date();
 const offset = today.getDay() === 0 ? -6 : 1 - today.getDay();
 const monday = new Date(today.setDate(today.getDate() + offset));
 const folderName = `Expired Leads Week of ${monday.getMonth() + 1}.${monday.getDate()}`;
 
-const buildGoogleMapsLink = ({ street, city, state, zip }) => {
+// 🗺️ Google Maps fallback link
+function buildGoogleMapsLink({ street, city, state, zip }) {
   const parts = [street, city, state, zip].filter(Boolean).join(", ");
   return parts ? `https://www.google.com/maps/search/?api=1&query=${encodeURIComponent(parts)}` : "";
-};
-
-const clickFolderByName = async (page, name) => {
-  const lower = name.trim().toLowerCase();
-  await page.waitForFunction(
-    (name) =>
-      Array.from(document.querySelectorAll("div.contacts-folder-nav-name")).some(
-        (el) => (el.textContent || "").trim().toLowerCase() === name
-      ),
-    { timeout: 30000 },
-    lower
-  );
-  const clicked = await page.evaluate((name) => {
-    const target = Array.from(document.querySelectorAll("div.contacts-folder-nav-name")).find(
-      (el) => (el.textContent || "").trim().toLowerCase() === name
-    );
-    if (target) {
-      target.click();
-      return true;
-    }
-    return false;
-  }, lower);
-  if (!clicked) throw new Error(`Folder "${name}" not found`);
-};
+}
 
 (async () => {
   const browser = await puppeteer.launch({
@@ -57,30 +40,23 @@ const clickFolderByName = async (page, name) => {
 
   const page = await browser.newPage();
   page.setDefaultTimeout(120000);
-  await page.setUserAgent("Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 Chrome/123 Safari/537.36");
+  page.setDefaultNavigationTimeout(120000);
+  await page.setUserAgent("Mozilla/5.0 (X11; Linux x86_64)");
   await page.setViewport({ width: 1366, height: 768 });
-  await page.setRequestInterception(true);
-  page.on("request", (req) => {
-    if (["image", "font", "media"].includes(req.resourceType())) req.abort();
-    else req.continue();
-  });
 
   try {
     if (!EMAIL || !PASSWORD || !WEBHOOK_URL) throw new Error("Missing EMAIL, PASSWORD, or WEBHOOK_URL");
 
+    // Login
     await page.goto(LOGIN_URL);
     await page.waitForSelector('input[name="email"], #email, input[name="username"]');
     await page.waitForSelector('input[name="password"], #password');
 
-    const emailSel =
-      (await page.$('input[name="email"]')) ? 'input[name="email"]' :
-      (await page.$("#email")) ? "#email" :
-      'input[name="username"]';
+    const emailSel = (await page.$('input[name="email"]')) ? 'input[name="email"]' : (await page.$("#email")) ? "#email" : 'input[name="username"]';
     const passSel = (await page.$('input[name="password"]')) ? 'input[name="password"]' : "#password";
 
     await page.type(emailSel, EMAIL, { delay: 20 });
     await page.type(passSel, PASSWORD, { delay: 20 });
-
     await Promise.all([
       page.waitForNavigation({ waitUntil: "domcontentloaded" }),
       page.click('button[type="submit"], .login-button'),
@@ -88,95 +64,98 @@ const clickFolderByName = async (page, name) => {
 
     if (page.url().includes("/login")) throw new Error("Login failed");
 
+    // Go to Off Market
     await page.goto(CONTACTS_URL);
-    await sleep(1500);
-    await clickFolderByName(page, "Off Market");
     await sleep(2000);
 
-    await page.waitForFunction(() => {
-      const body = (document.body.innerText || "").toLowerCase();
-      return document.querySelectorAll("[data-itemid]").length > 0 || body.includes("no contacts");
+    // Click Off Market folder
+    await page.evaluate(() => {
+      const folder = Array.from(document.querySelectorAll("div.contacts-folder-nav-name"))
+        .find(el => el.textContent.trim().toLowerCase() === "off market");
+      if (folder) folder.click();
     });
 
-    const contactLinks = await page.$$eval("[data-itemid] a", (links) =>
-      links.map((el) => ({ id: el.closest("[data-itemid]").getAttribute("data-itemid"), href: el.href }))
-    );
+    await page.waitForFunction(() => document.querySelectorAll("[data-itemid]").length > 0);
 
-    const leads = [];
+    // Get contact links
+    const contactLinks = await page.evaluate(() => {
+      return Array.from(document.querySelectorAll("[data-itemid] a[href*='contact_id=']")).map(a => ({
+        url: a.href,
+        id: a.closest("[data-itemid]").getAttribute("data-itemid")
+      }));
+    });
 
-    for (const { id, href } of contactLinks) {
-      await page.goto(href);
-      await page.waitForSelector("body");
+    console.log("✅ Found leads:", contactLinks.length);
+
+    // Cache loading
+    const cache = fs.existsSync(CACHE_FILE) ? new Set(JSON.parse(fs.readFileSync(CACHE_FILE, "utf-8"))) : new Set();
+    const seen = new Set();
+    const results = [];
+
+    for (const { url, id } of contactLinks) {
+      await page.goto(url, { waitUntil: "domcontentloaded" });
+      await sleep(1000);
 
       const lead = await page.evaluate(() => {
-        const getText = (sel) => document.querySelector(sel)?.textContent?.trim() || "";
-        const getInputValue = (sel) => document.querySelector(sel)?.value?.trim() || "";
-        const getLinkHref = (sel) => document.querySelector(sel)?.href || "";
+        const safe = (q) => {
+          const el = document.querySelector(q);
+          return (el?.textContent || "").trim();
+        };
+        const emailEl = document.querySelector("a[href^='mailto:']");
+        const phoneEl = document.querySelector("a[href^='tel:']");
+
+        const getField = (label) => {
+          const th = Array.from(document.querySelectorAll("th")).find(th => th.textContent.trim() === label);
+          return th?.nextElementSibling?.textContent.trim() || "";
+        };
 
         return {
-          full_name: getText("h3.contact-name"),
-          phone: getText(".phone-numbers li span") || "",
-          email: getText(".email-addresses li span") || "",
-          address: getText(".address-block .street") || "",
-          city: getText(".address-block .city") || "",
-          state: getText(".address-block .state") || "",
-          zip: getText(".address-block .zip") || "",
-          property_type: getText("td.propertyType") || "",
-          mls_number: getText("td.mlsNumber") || "",
-          mls_status: getText("td.status") || "",
-          status_change_date: getText("td.statusChangeDate") || "",
-          list_price: getText("td.listPrice") || "",
-          beds: getText("td.beds") || "",
-          baths: getText("td.baths") || "",
-          sqft: getText("td.squareFootage") || "",
-          days_on_market: getText("td.daysOnMarket") || "",
-          listing_agent: getText("td.agentName") || "",
-          listing_office: getText("td.officeName") || "",
-          zillow_link: getLinkHref("a[href*='zillow.com']"),
-          maps_link: getLinkHref("a[href*='maps.google.com']") || "",
+          full_name: safe("h1") || "Unknown",
+          phone: phoneEl?.textContent.trim() || "",
+          email: emailEl?.textContent.replace("mailto:", "") || "",
+          address: getField("Address"),
+          city: getField("City"),
+          state: getField("State"),
+          zip: getField("Zip"),
+          property_type: getField("Property Type"),
+          mls_number: getField("MLS Number"),
+          mls_status: getField("MLS Status"),
+          status_change_date: getField("Status Change Date"),
+          list_price: getField("List Price"),
+          beds: getField("Beds"),
+          baths: getField("Baths"),
+          square_footage: getField("Square Footage"),
+          days_on_market: getField("Days On Market"),
+          listing_agent: getField("Listing Agent"),
+          listing_office: getField("Listing Office"),
         };
       });
 
-      const parts = (lead.full_name || "").split(" ");
-      lead.first_name = parts[0] || "";
-      lead.last_name = parts.slice(1).join(" ");
-      lead.google_maps_fallback = buildGoogleMapsLink(lead);
+      lead.contact_id = id;
+      lead.google_maps_link = buildGoogleMapsLink(lead);
 
-      leads.push(lead);
-      await sleep(300);
-    }
-
-    console.log("✅ Found leads:", leads.length);
-
-    const cache = fs.existsSync(CACHE_FILE)
-      ? new Set(JSON.parse(fs.readFileSync(CACHE_FILE, "utf-8")))
-      : new Set();
-
-    const seen = new Set();
-    const unsent = leads.filter((lead) => {
       const key = `${lead.full_name}|${lead.phone}`;
-      const isNew = !cache.has(key) && !seen.has(key);
-      seen.add(key);
-      return isNew;
-    });
+      if (!cache.has(key) && !seen.has(key)) {
+        seen.add(key);
+        results.push(lead);
 
-    console.log("📤 Leads to send:", unsent.length);
-
-    for (const lead of unsent) {
-      try {
-        await axios.post(WEBHOOK_URL, {
-          version: "v2",
-          timestamp: new Date().toISOString(),
-          lead,
-        });
-        console.log("✅ Sent:", lead.full_name);
-      } catch (e) {
-        console.warn("❌ Failed:", lead.full_name, e.message);
+        try {
+          await axios.post(WEBHOOK_URL, {
+            version: "v2",
+            timestamp: new Date().toISOString(),
+            lead,
+          });
+          console.log("✅ Sent:", lead.full_name);
+        } catch (e) {
+          console.warn("❌ Failed:", lead.full_name, e.message);
+        }
       }
     }
 
-    fs.writeFileSync(CACHE_FILE, JSON.stringify([...cache, ...[...seen]], null, 2));
+    // Save cache
+    fs.writeFileSync(CACHE_FILE, JSON.stringify([...cache, ...seen], null, 2));
 
+    // Create folder if needed
     await page.goto(FOLDER_URL);
     await page.waitForSelector("#new_folder_button");
     await page.click("#new_folder_button");
@@ -186,10 +165,16 @@ const clickFolderByName = async (page, name) => {
     await page.click('button[type="submit"]').catch(() => {});
     await sleep(3000);
 
+    // Move contacts
     await page.goto(CONTACTS_URL);
-    await clickFolderByName(page, "Off Market");
     await sleep(1500);
+    await page.evaluate(() => {
+      const folder = Array.from(document.querySelectorAll("div.contacts-folder-nav-name"))
+        .find(el => el.textContent.trim().toLowerCase() === "off market");
+      if (folder) folder.click();
+    });
 
+    await page.waitForSelector("#master_checkbox");
     await page.click("#master_checkbox");
     await sleep(1000);
     await page.click("#cm_move_button");
@@ -199,7 +184,7 @@ const clickFolderByName = async (page, name) => {
     const target = await page.$(moveSel);
     if (target) {
       await target.click();
-      console.log("✅ Moved to folder:", folderName);
+      console.log("✅ Moved contacts to:", folderName);
     } else {
       console.warn("⚠️ Could not find folder to move contacts.");
     }
