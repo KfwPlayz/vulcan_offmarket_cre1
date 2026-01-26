@@ -9,7 +9,7 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
 // 🔐 Credentials and Constants
 const LOGIN_URL = "https://www.vulcan7dialer.com/login";
-const CONTACTS_URL = "https://www.vulcan7dialer.com/cm/index#params/dmlld19pZD05ODEzOCZwYWdlPTE=";
+const CONTACTS_URL = "https://www.vulcan7dialer.com/cm/index";
 const FOLDER_URL = "https://www.vulcan7dialer.com/cm/folders/index";
 
 const EMAIL = process.env.EMAIL;
@@ -64,16 +64,17 @@ function buildGoogleMapsLink({ address, city, state, zip }) {
 
     if (page.url().includes("/login")) throw new Error("Login failed");
 
-    // Go to Contacts page (Off Market folder)
+    // Go to Contacts page
     await page.goto(CONTACTS_URL, { waitUntil: "networkidle2" });
     await sleep(2000);
 
-    // 🔁 Click "Off Market" folder and wait for leads
-    //await page.evaluate(() => {
-      //const folders = Array.from(document.querySelectorAll("div.contacts-folder-nav-name"));
-      //const target = folders.find(el => el.textContent.trim().toLowerCase() === "off market");
-      //if (target) target.click();
-    //});
+    // 🗂 Click the "Off Market" folder manually
+    await page.evaluate(() => {
+      const folders = Array.from(document.querySelectorAll("div.contacts-folder-nav-name"));
+      const target = folders.find(el => el.textContent.trim().toLowerCase() === "off market");
+      if (target) target.click();
+    });
+    await sleep(2000);
 
     await page.waitForFunction(() => {
       const items = document.querySelectorAll("[data-itemid]");
@@ -166,7 +167,7 @@ function buildGoogleMapsLink({ address, city, state, zip }) {
     await page.click('button[type="submit"]').catch(() => {});
     await sleep(3000);
 
-    // Move contacts to the folder
+    // Move contacts to the new folder
     await page.goto(CONTACTS_URL);
     await sleep(2000);
     await page.evaluate(() => {
@@ -174,6 +175,7 @@ function buildGoogleMapsLink({ address, city, state, zip }) {
       const target = folders.find(el => el.textContent.trim().toLowerCase() === "off market");
       if (target) target.click();
     });
+    await sleep(2000);
     await page.waitForSelector("#master_checkbox");
     await page.click("#master_checkbox");
     await sleep(1000);
@@ -182,11 +184,23 @@ function buildGoogleMapsLink({ address, city, state, zip }) {
 
     const moveSel = `li.move-contacts-folder[title="${folderName}"] a.move-to-folder`;
     const target = await page.$(moveSel);
+
     if (target) {
-      await target.click();
-      console.log("✅ Moved contacts to:", folderName);
+      const box = await target.boundingBox();
+      if (box) {
+        await target.click();
+        console.log("✅ Moved contacts to:", folderName);
+      } else {
+        console.warn("⚠️ Move target found but not clickable.");
+      }
     } else {
+      const folderTitles = await page.evaluate(() =>
+        Array.from(document.querySelectorAll("li.move-contacts-folder")).map(li =>
+          li.getAttribute("title")
+        )
+      );
       console.warn("⚠️ Could not find folder to move contacts.");
+      console.log("📂 Available folder titles:", folderTitles);
     }
 
   } catch (err) {
