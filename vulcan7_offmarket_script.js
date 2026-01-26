@@ -69,11 +69,11 @@ function buildGoogleMapsLink({ address, city, state, zip }) {
     await sleep(2000);
 
     // 🔁 Click "Off Market" folder and wait for leads
-    await page.evaluate(() => {
-      const folders = Array.from(document.querySelectorAll("div.contacts-folder-nav-name"));
-      const target = folders.find(el => el.textContent.trim().toLowerCase() === "off market");
-      if (target) target.click();
-    });
+    //await page.evaluate(() => {
+      //const folders = Array.from(document.querySelectorAll("div.contacts-folder-nav-name"));
+      //const target = folders.find(el => el.textContent.trim().toLowerCase() === "off market");
+      //if (target) target.click();
+    //});
 
     await page.waitForFunction(() => {
       const items = document.querySelectorAll("[data-itemid]");
