@@ -10,7 +10,7 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 // 🔐 Credentials and Constants
 const LOGIN_URL = "https://www.vulcan7dialer.com/login";
 const CONTACTS_URL = "https://www.vulcan7dialer.com/cm/index#contacts";
-const FOLDER_URL = "https://www.vulcan7dialer.com/cm/folders/index";
+const FOLDER_URL = "https://www.vulcan7dialer.com/cm/index#params/dmlld19pZD05ODEzOCZwYWdlPTE=";
 
 const EMAIL = process.env.EMAIL;
 const PASSWORD = process.env.PASSWORD;
