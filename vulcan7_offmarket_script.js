@@ -4,13 +4,14 @@ const axios = require("axios");
 const fs = require("fs");
 const path = require("path");
 
-// Helper
+// 🔧 Helpers
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
 // 🔐 Credentials and Constants
 const LOGIN_URL = "https://www.vulcan7dialer.com/login";
 const CONTACTS_SHELL_URL = "https://www.vulcan7dialer.com/cm/index#contacts";
 const FOLDER_URL = "https://www.vulcan7dialer.com/cm/folders/index";
+const OFF_MARKET_FOLDER_LINK = "https://www.vulcan7dialer.com/cm/index#params/dmlld19pZD05ODEzOCZwYWdlPTE=";
 
 const EMAIL = process.env.EMAIL;
 const PASSWORD = process.env.PASSWORD;
@@ -31,50 +32,23 @@ function buildGoogleMapsLink({ street, city, state, zip }) {
   return parts ? `https://www.google.com/maps/search/?api=1&query=${encodeURIComponent(parts)}` : "";
 }
 
-// 📁 Robust folder click
-async function clickFolderByName(page, name) {
-  const lower = name.trim().toLowerCase();
-  await page.waitForFunction(
-    (name) =>
-      Array.from(document.querySelectorAll("div.contacts-folder-nav-name")).some(
-        (el) => (el.textContent || "").trim().toLowerCase() === name
-      ),
-    { timeout: 30000 },
-    lower
-  );
-  const clicked = await page.evaluate((name) => {
-    const target = Array.from(document.querySelectorAll("div.contacts-folder-nav-name")).find(
-      (el) => (el.textContent || "").trim().toLowerCase() === name
-    );
-    if (target) {
-      target.click();
-      return true;
-    }
-    return false;
-  }, lower);
-  if (!clicked) throw new Error(`Folder "${name}" not found`);
-}
-
-// 🧠 Extract text helper
-const safeText = (el) => (el?.textContent || "").replace(/\s+/g, " ").trim();
-
 (async () => {
   const browser = await puppeteer.launch({
     headless: "new",
     executablePath: EXEC_PATH,
-    args: ["--no-sandbox", "--disable-setuid-sandbox", "--disable-dev-shm-usage", "--disable-gpu", "--single-process"],
+    args: [
+      "--no-sandbox",
+      "--disable-setuid-sandbox",
+      "--disable-dev-shm-usage",
+      "--disable-gpu",
+      "--single-process",
+    ],
   });
 
   const page = await browser.newPage();
   page.setDefaultTimeout(120000);
+  page.setDefaultNavigationTimeout(120000);
   await page.setUserAgent("Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 Chrome/123 Safari/537.36");
-  await page.setViewport({ width: 1366, height: 768 });
-  await page.setRequestInterception(true);
-  page.on("request", (req) => {
-    const type = req.resourceType();
-    if (["image", "font", "media"].includes(type)) req.abort();
-    else req.continue();
-  });
 
   try {
     if (!EMAIL || !PASSWORD || !WEBHOOK_URL) throw new Error("Missing EMAIL, PASSWORD, or WEBHOOK_URL");
@@ -98,102 +72,62 @@ const safeText = (el) => (el?.textContent || "").replace(/\s+/g, " ").trim();
       page.click('button[type="submit"], .login-button'),
     ]);
 
-    if (page.url().includes("/login")) throw new Error("Login failed");
+    const url = page.url();
+    if (url.includes("/login")) throw new Error("Login failed");
 
-    // Go to Off Market
-    await page.goto(CONTACTS_SHELL_URL);
-    await sleep(1500);
-    await clickFolderByName(page, "Off Market");
-    await sleep(2000);
+    // Go to Off Market folder directly
+    await page.goto(OFF_MARKET_FOLDER_LINK);
+    await page.waitForSelector("[data-itemid]");
 
-    await page.waitForFunction(() => {
-      const body = (document.body.innerText || "").toLowerCase();
-      return document.querySelectorAll("[data-itemid]").length > 0 || body.includes("no contacts");
-    });
+    // Get contact links
+    const contactSelectors = await page.$$eval("[data-itemid] a[href]", anchors =>
+      anchors.map(a => ({ id: a.closest("[data-itemid]")?.getAttribute("data-itemid"), href: a.href }))
+    );
 
-    // Scrape contacts
-    const contactNodes = await page.$$("[data-itemid]");
     const leads = [];
+    for (const contact of contactSelectors) {
+      await page.goto(contact.href);
+      await page.waitForSelector(".contact-details", { timeout: 15000 }).catch(() => {});
+      await sleep(1000);
 
-    for (const node of contactNodes) {
-      const id = await node.evaluate((el) => el.getAttribute("data-itemid"));
-      const nameEl = await node.$("a");
-      const fullName = nameEl ? await nameEl.evaluate(safeText) : "";
-      if (!fullName || fullName === "Insert Timestamp") continue;
+      const lead = await page.evaluate(() => {
+        const get = (selector) => document.querySelector(selector)?.textContent?.trim() || "";
+        const getHref = (selector) => document.querySelector(selector)?.href || "";
 
-      const parts = fullName.split(" ");
-      const phone = await page.$eval(`div[id^='cell-example-${id}-']`, el => el.innerText.trim()).catch(() => "");
-      const emailEl = await page.$(`div[id^='cell-example-${id}-'] a[href^='mailto:']`);
-      const email = emailEl ? (await emailEl.evaluate((a) => a.href)).replace("mailto:", "") : "";
-
-      // Open lead detail in new tab
-      const detailPage = await browser.newPage();
-      await detailPage.goto(`https://www.vulcan7dialer.com/cm/contact/edit/${id}`);
-      await detailPage.waitForSelector("body", { timeout: 10000 }).catch(() => {});
-      await sleep(3000);
-
-      const details = await detailPage.evaluate(() => {
-        const get = (label) => {
-          const row = Array.from(document.querySelectorAll(".form-group"))
-            .find((g) => g.innerText?.toLowerCase().includes(label.toLowerCase()));
-          return row?.querySelector("input, select")?.value?.trim() || "";
-        };
-
-        const street = get("Street");
-        const city = get("City");
-        const state = get("State");
-        const zip = get("Zip");
-        const mlsNumber = get("MLS Number");
-        const mlsStatus = get("MLS Status");
-        const statusDate = get("Status Change Date");
-        const price = get("List Price");
-        const type = get("Property Type");
-        const beds = get("Beds");
-        const baths = get("Baths");
-        const sqft = get("Square Footage");
-        const dom = get("Days On Market");
-        const agent = get("Listing Agent");
-        const office = get("Listing Office");
+        const address = get(".contact-details .address") || "";
+        const [street, city, stateZip] = address.split(",").map((s) => s.trim());
+        const [state, zip] = (stateZip || "").split(" ").map((s) => s.trim());
 
         return {
+          full_name: get(".contact-name") || "",
+          phone: get(".contact-phone") || "",
+          email: getHref("a[href^='mailto:']").replace("mailto:", ""),
+          property_type: get("td:contains('Property Type') + td"),
+          mls_number: get("td:contains('MLS Number') + td"),
+          mls_status: get("td:contains('MLS Status') + td"),
+          status_change_date: get("td:contains('Status Change Date') + td"),
+          list_price: get("td:contains('List Price') + td"),
+          beds: get("td:contains('Beds') + td"),
+          baths: get("td:contains('Baths') + td"),
+          square_footage: get("td:contains('Square Footage') + td"),
+          days_on_market: get("td:contains('Days On Market') + td"),
+          listing_agent: get("td:contains('Listing Agent') + td"),
+          listing_office: get("td:contains('Listing Office') + td"),
           street,
           city,
           state,
           zip,
-          mlsNumber,
-          mlsStatus,
-          statusDate,
-          price,
-          type,
-          beds,
-          baths,
-          sqft,
-          dom,
-          agent,
-          office,
+          zillow_link: getHref("a[href*='zillow.com']"),
         };
       });
 
-      await detailPage.close();
-
-      leads.push({
-        contact_id: id,
-        full_name: fullName,
-        first_name: parts[0] || "",
-        last_name: parts.slice(1).join(" "),
-        phone,
-        email,
-        ...details,
-        zillow_link: details.street && details.zip
-          ? `https://www.zillow.com/homes/${encodeURIComponent(details.street + " " + details.zip)}`
-          : "",
-        google_maps_link: buildGoogleMapsLink(details),
-      });
+      lead.google_maps_link = buildGoogleMapsLink(lead);
+      leads.push(lead);
     }
 
     console.log("✅ Found leads:", leads.length);
 
-    // Deduplication
+    // De-duplicate
     const cache = fs.existsSync(CACHE_FILE)
       ? new Set(JSON.parse(fs.readFileSync(CACHE_FILE, "utf-8")))
       : new Set();
@@ -211,7 +145,7 @@ const safeText = (el) => (el?.textContent || "").replace(/\s+/g, " ").trim();
     for (const lead of unsent) {
       try {
         await axios.post(WEBHOOK_URL, {
-          version: "v3",
+          version: "v2",
           timestamp: new Date().toISOString(),
           lead,
         });
@@ -223,7 +157,7 @@ const safeText = (el) => (el?.textContent || "").replace(/\s+/g, " ").trim();
 
     fs.writeFileSync(CACHE_FILE, JSON.stringify([...cache, ...[...seen]], null, 2));
 
-    // Folder creation and moving
+    // Create new folder
     await page.goto(FOLDER_URL);
     await page.waitForSelector("#new_folder_button");
     await page.click("#new_folder_button");
@@ -233,10 +167,9 @@ const safeText = (el) => (el?.textContent || "").replace(/\s+/g, " ").trim();
     await page.click('button[type="submit"]').catch(() => {});
     await sleep(3000);
 
-    await page.goto(CONTACTS_SHELL_URL);
-    await clickFolderByName(page, "Off Market");
-    await sleep(1500);
-
+    // Move contacts
+    await page.goto(OFF_MARKET_FOLDER_LINK);
+    await page.waitForSelector("#master_checkbox");
     await page.click("#master_checkbox");
     await sleep(1000);
     await page.click("#cm_move_button");
