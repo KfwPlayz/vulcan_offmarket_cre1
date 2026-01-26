@@ -26,8 +26,8 @@ const monday = new Date(today.setDate(today.getDate() + offset));
 const folderName = `Expired Leads Week of ${monday.getMonth() + 1}.${monday.getDate()}`;
 
 // 🗺️ Google Maps fallback link
-function buildGoogleMapsLink({ street, city, state, zip }) {
-  const parts = [street, city, state, zip].filter(Boolean).join(", ");
+function buildGoogleMapsLink({ address, city, state, zip }) {
+  const parts = [address, city, state, zip].filter(Boolean).join(", ");
   return parts ? `https://www.google.com/maps/search/?api=1&query=${encodeURIComponent(parts)}` : "";
 }
 
@@ -64,20 +64,25 @@ function buildGoogleMapsLink({ street, city, state, zip }) {
 
     if (page.url().includes("/login")) throw new Error("Login failed");
 
-    // Go to Off Market
-    await page.goto(CONTACTS_URL);
+    // Go to Contacts page (Off Market folder)
+    await page.goto(CONTACTS_URL, { waitUntil: "networkidle2" });
     await sleep(2000);
 
-    // Click Off Market folder
+    // 🔁 Click "Off Market" folder and wait for leads
     await page.evaluate(() => {
-      const folder = Array.from(document.querySelectorAll("div.contacts-folder-nav-name"))
-        .find(el => el.textContent.trim().toLowerCase() === "off market");
-      if (folder) folder.click();
+      const folders = Array.from(document.querySelectorAll("div.contacts-folder-nav-name"));
+      const target = folders.find(el => el.textContent.trim().toLowerCase() === "off market");
+      if (target) target.click();
     });
 
-    await page.waitForFunction(() => document.querySelectorAll("[data-itemid]").length > 0);
+    await page.waitForFunction(() => {
+      const items = document.querySelectorAll("[data-itemid]");
+      return items.length > 0;
+    }, { timeout: 15000 });
 
-    // Get contact links
+    const testCount = await page.evaluate(() => document.querySelectorAll("[data-itemid]").length);
+    console.log("✅ Found leads:", testCount);
+
     const contactLinks = await page.evaluate(() => {
       return Array.from(document.querySelectorAll("[data-itemid] a[href*='contact_id=']")).map(a => ({
         url: a.href,
@@ -85,9 +90,6 @@ function buildGoogleMapsLink({ street, city, state, zip }) {
       }));
     });
 
-    console.log("✅ Found leads:", contactLinks.length);
-
-    // Cache loading
     const cache = fs.existsSync(CACHE_FILE) ? new Set(JSON.parse(fs.readFileSync(CACHE_FILE, "utf-8"))) : new Set();
     const seen = new Set();
     const results = [];
@@ -152,10 +154,9 @@ function buildGoogleMapsLink({ street, city, state, zip }) {
       }
     }
 
-    // Save cache
     fs.writeFileSync(CACHE_FILE, JSON.stringify([...cache, ...seen], null, 2));
 
-    // Create folder if needed
+    // Create folder if not exists
     await page.goto(FOLDER_URL);
     await page.waitForSelector("#new_folder_button");
     await page.click("#new_folder_button");
@@ -165,15 +166,14 @@ function buildGoogleMapsLink({ street, city, state, zip }) {
     await page.click('button[type="submit"]').catch(() => {});
     await sleep(3000);
 
-    // Move contacts
+    // Move contacts to the folder
     await page.goto(CONTACTS_URL);
-    await sleep(1500);
+    await sleep(2000);
     await page.evaluate(() => {
-      const folder = Array.from(document.querySelectorAll("div.contacts-folder-nav-name"))
-        .find(el => el.textContent.trim().toLowerCase() === "off market");
-      if (folder) folder.click();
+      const folders = Array.from(document.querySelectorAll("div.contacts-folder-nav-name"));
+      const target = folders.find(el => el.textContent.trim().toLowerCase() === "off market");
+      if (target) target.click();
     });
-
     await page.waitForSelector("#master_checkbox");
     await page.click("#master_checkbox");
     await sleep(1000);
