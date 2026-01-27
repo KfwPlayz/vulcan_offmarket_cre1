@@ -14,7 +14,7 @@ const FOLDER_URL = "https://www.vulcan7dialer.com/cm/folders/index";
 const EMAIL = process.env.EMAIL;
 const PASSWORD = process.env.PASSWORD;
 const WEBHOOK_URL = process.env.WEBHOOK_URL;
-const CACHE_FILE = path.join(__dirname, "sent-leads-cache-offmarket.json");
+const CACHE_FILE = path.join(__dirname, "sent-leads-cache-fsbo.json");
 
 // 📅 Folder name = Monday of current week
 const today = new Date();
@@ -114,7 +114,7 @@ const folderName = `Expired Leads Week of ${monday.getMonth() + 1}.${monday.getD
       return leads;
     });
 
-    console.log(`✅ Found ${leads.length} raw leads in "Off Market"`);
+    console.log(`✅ Found ${leads.length} raw leads in "FSBO"`);
 
     // 📥 Deduplication
     const seen = new Set(), filtered = [], dupes = [];
@@ -145,127 +145,38 @@ const folderName = `Expired Leads Week of ${monday.getMonth() + 1}.${monday.getD
       }
     }
 
-    // 🔍 Visit each contact detail page to fetch address + extra property info
-for (const lead of unsentLeads) {
-  const detailPage = await browser.newPage();
-  try {
-    const detailUrl = `https://www.vulcan7dialer.com/cm/index#contact/${lead.contact_id}`;
-    await detailPage.goto(detailUrl, { waitUntil: "domcontentloaded", timeout: 120000 });
-    await sleep(1200);
+    // 🔍 Visit each contact detail page to fetch address info
+    for (const lead of unsentLeads) {
+      const detailPage = await browser.newPage();
+      try {
+        const detailUrl = `https://www.vulcan7dialer.com/cm/index#contact/${lead.contact_id}`;
+        await detailPage.goto(detailUrl, { waitUntil: "domcontentloaded", timeout: 120000 });
+        await detailPage.waitForSelector('a[data-type="address"]', { timeout: 10000 });
 
-    const detailData = await detailPage.evaluate(() => {
-      const safeText = (el) => (el?.textContent || "").replace(/\s+/g, " ").trim();
-      const norm = (s) => (s || "").toLowerCase().replace(/\s+/g, " ").replace(/:$/, "").trim();
+        const address = await detailPage.evaluate(() => {
+          const el = document.querySelector('a[data-type="address"]');
+          if (!el) return {};
+          try {
+            const data = JSON.parse(el.getAttribute("data-value") || "{}");
+            return {
+              street: data.address || "",
+              city: data.city || "",
+              state: data.state || "",
+              zip: data.zip || ""
+            };
+          } catch { return {}; }
+        });
 
-      // ---- ADDRESS ----
-      let address = { street: "", city: "", state: "", zip: "" };
-      const addrEl = document.querySelector('a[data-type="address"]');
-      if (addrEl) {
-        try {
-          const data = JSON.parse(addrEl.getAttribute("data-value") || "{}");
-          address = {
-            street: data.address || "",
-            city: data.city || "",
-            state: data.state || "",
-            zip: data.zip || ""
-          };
-        } catch {}
+        Object.assign(lead, { street: "", city: "", state: "", zip: "" }, address);
+      } catch (err) {
+        console.error(`⚠️ Address fetch failed for ${lead.full_name}: ${err.message}`);
+        try { await detailPage.screenshot({ path: `failure_${lead.contact_id}.png`, fullPage: true }); } catch {}
+        Object.assign(lead, { street: "", city: "", state: "", zip: "" });
+      } finally {
+        await detailPage.close();
+        await sleep(300);
       }
-
-      // ---- GENERIC LABEL → VALUE SCRAPER ----
-      const all = Array.from(document.querySelectorAll("*"));
-      const getByLabel = (label) => {
-        const want = norm(label);
-        const el = all.find(e => norm(safeText(e)) === want);
-        if (!el) return "";
-        const row = el.closest("tr") || el.parentElement;
-        if (!row) return "";
-        const parts = Array.from(row.querySelectorAll("td,th,div,span"))
-          .map(safeText)
-          .filter(Boolean);
-        const idx = parts.findIndex(t => norm(t) === want);
-        return (idx >= 0 && parts[idx + 1]) ? parts[idx + 1] : "";
-      };
-
-      // ---- PROPERTY FIELDS ----
-      const property_type = getByLabel("Property Type");
-      const mls_number = getByLabel("MLS Number");
-      const mls_status = getByLabel("MLS Status");
-      const status_change_date = getByLabel("Status Change Date");
-      const list_price = getByLabel("List Price");
-      const beds = getByLabel("Beds");
-      const baths = getByLabel("Baths");
-      const square_footage = getByLabel("Square Footage");
-      const days_on_market = getByLabel("Days On Market");
-      const listing_agent = getByLabel("Listing Agent");
-      const listing_office = getByLabel("Listing Office");
-
-      // ---- LINKS ----
-      const links = Array.from(document.querySelectorAll("a[href]"))
-        .map(a => a.getAttribute("href"))
-        .filter(Boolean);
-
-      const zillow_link = links.find(h => /zillow\.com/i.test(h)) || "";
-      const google_maps_link =
-        links.find(h => /google\.(com|ca)\/maps/i.test(h)) ||
-        links.find(h => /maps\.google/i.test(h)) ||
-        "";
-
-      return {
-        address,
-        property_type,
-        mls_number,
-        mls_status,
-        status_change_date,
-        list_price,
-        beds,
-        baths,
-        square_footage,
-        days_on_market,
-        listing_agent,
-        listing_office,
-        zillow_link,
-        google_maps_link
-      };
-    });
-
-    // ---- MERGE INTO LEAD (SAFE DEFAULTS) ----
-    Object.assign(
-      lead,
-      {
-        street: "",
-        city: "",
-        state: "",
-        zip: "",
-        property_type: "",
-        mls_number: "",
-        mls_status: "",
-        status_change_date: "",
-        list_price: "",
-        beds: "",
-        baths: "",
-        square_footage: "",
-        days_on_market: "",
-        listing_agent: "",
-        listing_office: "",
-        zillow_link: "",
-        google_maps_link: ""
-      },
-      detailData.address || {},
-      detailData
-    );
-
-  } catch (err) {
-    console.error(`⚠️ Detail fetch failed for ${lead.full_name}: ${err.message}`);
-    try {
-      await detailPage.screenshot({ path: `failure_${lead.contact_id}.png`, fullPage: true });
-    } catch {}
-  } finally {
-    await detailPage.close();
-    await sleep(300);
-  }
-}
-
+    }
 
     // 📤 Send to Zapier
     for (const lead of unsentLeads) {
@@ -280,11 +191,114 @@ for (const lead of unsentLeads) {
     // 💾 Save updated cache
     const updatedCache = [...sentCache, ...newKeys];
     fs.writeFileSync(CACHE_FILE, JSON.stringify(updatedCache, null, 2));
-    } catch (err) {
-    console.error("❌ Script Error:", err);
+
+    // 📁 Check/create folder
+    await page.goto(CONTACTS_URL, { waitUntil: "domcontentloaded", timeout: 120000 });
+    await page.waitForSelector("div.contacts-folder-nav-name", { timeout: 120000 });
+
+    const normalizedName = folderName.replace(/\s+/g, "-");
+    const folderExists = await page.evaluate((dataFolderName) => {
+      const folders = [...document.querySelectorAll("div.contacts-folder-nav-name")];
+      return folders.some(f => f.getAttribute("data-folder-name") === dataFolderName);
+    }, normalizedName);
+
+    if (!folderExists) {
+      console.log(`📁 Creating folder "${folderName}"`);
+      await page.goto(FOLDER_URL, { waitUntil: "domcontentloaded", timeout: 120000 });
+      try {
+        await page.waitForSelector("#new_folder_button", { timeout: 120000 });
+        await page.click("#new_folder_button");
+        await page.waitForSelector("#name", { timeout: 120000 });
+        await page.type("#name", folderName);
+        try { await page.select("#placement", "INSIDE"); } catch {}
+        try {
+          await page.click("div[aria-haspopup='listbox']");
+          await page.waitForSelector("div[role='option']", { timeout: 10000 });
+          await page.evaluate(() => {
+            const option = [...document.querySelectorAll("div[role='option']")]
+              .find(el => el.textContent.trim() === "FSBO");
+            option?.click();
+          });
+        } catch {}
+        try { await page.select("#layout", "8109"); } catch {}
+        try { await page.click("button[type='submit']"); } catch {}
+        await sleep(3000);
+      } catch (err) {
+        console.warn(`⚠️ Folder creation flow might have changed: ${err.message}`);
+      }
+    } else {
+      console.log(`✅ Folder "${folderName}" already exists — skipping creation.`);
+    }
+
+    // 📂 Move contacts (robust)
+    await page.goto(CONTACTS_URL, { waitUntil: "domcontentloaded", timeout: 120000 });
+    await page.waitForSelector("#master_checkbox", { visible: true, timeout: 120000 });
+    await page.click("#master_checkbox");
+    console.log("✅ Selected all contacts via master checkbox.");
+
+    // Click the Move button
+    await page.waitForSelector("#cm_move_button", { visible: true, timeout: 120000 });
+    await page.click("#cm_move_button");
+    await sleep(800);
+
+    // Wait for either the dropdown container OR the folder items to exist
+    const menuShown = await page.waitForFunction(() => {
+      return !!document.querySelector("#cm_move_dropdown") ||
+             document.querySelectorAll("li.move-contacts-folder[title]").length > 0 ||
+             document.querySelectorAll("#cm_move_dropdown li, .dropdown-menu li").length > 0;
+    }, { timeout: 10000 }).catch(() => false);
+
+    // If not shown, try clicking again once
+    if (!menuShown) {
+      console.log("↻ Move menu not detected, retrying click…");
+      await page.click("#cm_move_button");
+      await sleep(1200);
+    }
+
+    // Log what we see for debugging
+    const menuDebug = await page.evaluate(() => ({
+      hasDropdown: !!document.querySelector("#cm_move_dropdown"),
+      itemsByTitle: document.querySelectorAll("li.move-contacts-folder[title]").length,
+      anyLis: document.querySelectorAll("#cm_move_dropdown li, .dropdown-menu li").length
+    }));
+    console.log("ℹ️ Move menu debug:", JSON.stringify(menuDebug));
+
+    // Try to click the target folder in a broad way
+    const moveSuccess = await page.evaluate((folderName) => {
+      let items = Array.from(document.querySelectorAll("li.move-contacts-folder[title]"));
+      if (!items.length) {
+        items = Array.from(document.querySelectorAll("#cm_move_dropdown li, .dropdown-menu li, li"));
+      }
+      for (const item of items) {
+        const title = (item.getAttribute("title") || item.textContent || "").trim();
+        if (title === folderName.trim()) {
+          const link = item.querySelector("a.move-to-folder") || item.querySelector("a, .dropdown-item, button");
+          if (link) { link.click(); return true; }
+        }
+      }
+      return false;
+    }, folderName);
+
+    // Confirm modal if it appears
     try {
-      await page.screenshot({ path: "failure.png", fullPage: true });
-    } catch {}
+      await page.waitForSelector("#bulk_actions_modal button.btn.btn-primary", { visible: true, timeout: 5000 });
+      await page.click("#bulk_actions_modal button.btn.btn-primary");
+      console.log("🟢 Confirmed move modal.");
+    } catch {
+      console.warn("⚠️ 'Okay' button did not appear after move.");
+    }
+
+    if (moveSuccess) {
+      console.log(`✅ Move to folder "${folderName}" triggered`);
+      await sleep(3000);
+    } else {
+      console.error(`❌ Could not find move folder: ${folderName}`);
+      try { await page.screenshot({ path: "failure_move.png", fullPage: true }); } catch {}
+    }
+
+  } catch (err) {
+    console.error("❌ Script Error:", err);
+    try { await page.screenshot({ path: "failure.png", fullPage: true }); } catch {}
     process.exitCode = 1;
   } finally {
     await browser.close();
