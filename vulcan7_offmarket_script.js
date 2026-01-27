@@ -1,34 +1,55 @@
-// 📌 Required Libraries
 const puppeteer = require("puppeteer");
 const axios = require("axios");
 const fs = require("fs");
 const path = require("path");
-
-// Helper
-const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
-
-// 🔐 Credentials and Constants
-const LOGIN_URL = "https://www.vulcan7dialer.com/login";
-const CONTACTS_URL = "https://www.vulcan7dialer.com/cm/index#params/dmlld19pZD05ODEzOCZwYWdlPTE=";
-const FOLDER_URL = "https://www.vulcan7dialer.com/cm/folders/index";
 
 const EMAIL = process.env.EMAIL;
 const PASSWORD = process.env.PASSWORD;
 const WEBHOOK_URL = process.env.WEBHOOK_URL;
 const EXEC_PATH = process.env.PUPPETEER_EXECUTABLE_PATH || "/usr/bin/chromium-browser";
 
+const CONTACTS_SHELL_URL = "https://www.vulcan7dialer.com/cm/index#contacts";
+const LOGIN_URL = "https://www.vulcan7dialer.com/login";
+const FOLDER_URL = "https://www.vulcan7dialer.com/cm/folders/index";
 const CACHE_FILE = path.join(__dirname, "sent-leads-cache-offmarket.json");
 
-// 📅 Folder name
+// Dynamic folder name
 const today = new Date();
-const offset = today.getDay() === 0 ? -6 : 1 - today.getDay();
-const monday = new Date(today.setDate(today.getDate() + offset));
+const monday = new Date(today.setDate(today.getDate() - ((today.getDay() + 6) % 7)));
 const folderName = `Expired Leads Week of ${monday.getMonth() + 1}.${monday.getDate()}`;
 
-// 🗺️ Google Maps fallback link
-function buildGoogleMapsLink({ address, city, state, zip }) {
-  const parts = [address, city, state, zip].filter(Boolean).join(", ");
-  return parts ? `https://www.google.com/maps/search/?api=1&query=${encodeURIComponent(parts)}` : "";
+// Helper
+const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+const safeText = (el) => (el?.textContent || "").replace(/\s+/g, " ").trim();
+
+function buildGoogleMapsLink({ street, city, state, zip }) {
+  const parts = [street, city, state, zip].filter(Boolean).join(", ");
+  if (!parts.trim()) return "";
+  return `https://www.google.com/maps/search/?api=1&query=${encodeURIComponent(parts)}`;
+}
+
+async function clickFolderByName(page, name) {
+  const lower = name.trim().toLowerCase();
+  await page.waitForFunction(
+    (lowerName) => {
+      const els = Array.from(document.querySelectorAll("div.contacts-folder-nav-name"));
+      return els.some((el) => (el.textContent || "").trim().toLowerCase() === lowerName);
+    },
+    { timeout: 30000 },
+    lower
+  );
+
+  const clicked = await page.evaluate((lowerName) => {
+    const els = Array.from(document.querySelectorAll("div.contacts-folder-nav-name"));
+    const target = els.find((el) => (el.textContent || "").trim().toLowerCase() === lowerName);
+    if (target) {
+      target.click();
+      return true;
+    }
+    return false;
+  }, lower);
+
+  if (!clicked) throw new Error(`Could not click folder "${name}" in left nav`);
 }
 
 (async () => {
@@ -41,14 +62,12 @@ function buildGoogleMapsLink({ address, city, state, zip }) {
   const page = await browser.newPage();
   page.setDefaultTimeout(120000);
   page.setDefaultNavigationTimeout(120000);
-  await page.setUserAgent("Mozilla/5.0 (X11; Linux x86_64)");
-  await page.setViewport({ width: 1366, height: 768 });
 
   try {
     if (!EMAIL || !PASSWORD || !WEBHOOK_URL) throw new Error("Missing EMAIL, PASSWORD, or WEBHOOK_URL");
 
-    // Login
-    await page.goto(LOGIN_URL);
+    // Log in
+    await page.goto(LOGIN_URL, { waitUntil: "domcontentloaded" });
     await page.waitForSelector('input[name="email"], #email, input[name="username"]');
     await page.waitForSelector('input[name="password"], #password');
 
@@ -62,151 +81,161 @@ function buildGoogleMapsLink({ address, city, state, zip }) {
       page.click('button[type="submit"], .login-button'),
     ]);
 
-    if (page.url().includes("/login")) throw new Error("Login failed");
-
-    // Navigate to Contacts page + wait
-    await page.goto(CONTACTS_URL, { waitUntil: "networkidle2" });
+    // Go to contacts and click Off Market
+    await page.goto(CONTACTS_SHELL_URL, { waitUntil: "domcontentloaded" });
+    await sleep(2000);
+    await clickFolderByName(page, "Off Market");
     await sleep(2000);
 
-    // ✅ Visually click and confirm the Off Market folder is selected
-    await page.evaluate(() => {
-      const folders = Array.from(document.querySelectorAll("div.contacts-folder-nav-name"));
-      const target = folders.find(el => el.textContent.trim().toLowerCase() === "off market");
-      if (target) target.click();
-    });
-
-    // 🟡 Wait for folder to populate
+    // Wait for leads to load
     await page.waitForFunction(() => {
-      const folderLabel = document.querySelector(".contacts-folder-title span");
-      return folderLabel && folderLabel.textContent.toLowerCase().includes("off market");
+      const gridLoaded = document.querySelectorAll("tr[data-itemid]").length > 0;
+      const noResults = (document.body.innerText || "").toLowerCase().includes("no contacts");
+      return gridLoaded || noResults;
     }, { timeout: 15000 });
 
-    await page.waitForSelector("[data-itemid] a[href*='contact_id=']", { timeout: 15000 });
+    const leads = await page.evaluate(() => {
+      const safeText = (el) => (el?.textContent || "").replace(/\s+/g, " ").trim();
+      let nodes = Array.from(document.querySelectorAll("tr[data-itemid]"));
+      if (!nodes.length) nodes = Array.from(document.querySelectorAll("[data-itemid]"));
 
-    const contactLinks = await page.evaluate(() => {
-      return Array.from(document.querySelectorAll("[data-itemid] a[href*='contact_id=']")).map(a => ({
-        url: a.href,
-        id: a.closest("[data-itemid]").getAttribute("data-itemid")
-      }));
+      const results = [];
+
+      for (const node of nodes) {
+        const id = node.getAttribute("data-itemid");
+        if (!id) continue;
+
+        let nameEl = node.querySelector(".contact-details-link a") || node.querySelector("a[href*='#contact/']");
+        const fullName = safeText(nameEl);
+        if (!fullName) continue;
+
+        const phoneDiv = document.querySelector(`div[id='cell-example-${id}-143332']`);
+        const phone = safeText(phoneDiv) || "";
+        const emailEl = document.querySelector(`div[id='cell-example-${id}-143333'] a[href^='mailto:']`);
+        const email = (emailEl?.getAttribute("href") || "").replace("mailto:", "").trim();
+
+        let phone2 = phone;
+        if (!phone2) {
+          const text = safeText(node);
+          const m = text.match(/(\(\d{3}\)\s*\d{3}-\d{4})/);
+          phone2 = m ? m[1] : "";
+        }
+
+        let email2 = email;
+        if (!email2) {
+          const m = safeText(node).match(/[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}/i);
+          email2 = m ? m[0] : "";
+        }
+
+        const nameParts = fullName.split(" ");
+        results.push({
+          full_name: fullName,
+          first_name: nameParts[0] || "",
+          last_name: nameParts.slice(1).join(" "),
+          phone: phone2 || "",
+          email: email2 || "",
+          contact_id: id,
+        });
+      }
+      return results;
     });
 
-    console.log("✅ Found leads:", contactLinks.length);
+    console.log(`✅ Found ${leads.length} leads`);
 
-    const cache = fs.existsSync(CACHE_FILE) ? new Set(JSON.parse(fs.readFileSync(CACHE_FILE, "utf-8"))) : new Set();
-    const seen = new Set();
-    const results = [];
-
-    for (const { url, id } of contactLinks) {
-      await page.goto(url, { waitUntil: "domcontentloaded" });
-      await sleep(1000);
-
-      const lead = await page.evaluate(() => {
-        const safe = (q) => {
-          const el = document.querySelector(q);
-          return (el?.textContent || "").trim();
-        };
-        const emailEl = document.querySelector("a[href^='mailto:']");
-        const phoneEl = document.querySelector("a[href^='tel:']");
-
-        const getField = (label) => {
-          const th = Array.from(document.querySelectorAll("th")).find(th => th.textContent.trim() === label);
-          return th?.nextElementSibling?.textContent.trim() || "";
-        };
-
-        return {
-          full_name: safe("h1") || "Unknown",
-          phone: phoneEl?.textContent.trim() || "",
-          email: emailEl?.textContent.replace("mailto:", "") || "",
-          address: getField("Address"),
-          city: getField("City"),
-          state: getField("State"),
-          zip: getField("Zip"),
-          property_type: getField("Property Type"),
-          mls_number: getField("MLS Number"),
-          mls_status: getField("MLS Status"),
-          status_change_date: getField("Status Change Date"),
-          list_price: getField("List Price"),
-          beds: getField("Beds"),
-          baths: getField("Baths"),
-          square_footage: getField("Square Footage"),
-          days_on_market: getField("Days On Market"),
-          listing_agent: getField("Listing Agent"),
-          listing_office: getField("Listing Office"),
-        };
-      });
-
-      lead.contact_id = id;
-      lead.google_maps_link = buildGoogleMapsLink(lead);
-
+    // Deduplicate
+    const seen = new Set(), filtered = [];
+    for (const lead of leads) {
       const key = `${lead.full_name}|${lead.phone}`;
-      if (!cache.has(key) && !seen.has(key)) {
+      if (!seen.has(key)) {
         seen.add(key);
-        results.push(lead);
-
-        try {
-          await axios.post(WEBHOOK_URL, {
-            version: "v2",
-            timestamp: new Date().toISOString(),
-            lead,
-          });
-          console.log("✅ Sent:", lead.full_name);
-        } catch (e) {
-          console.warn("❌ Failed:", lead.full_name, e.message);
-        }
+        filtered.push(lead);
       }
     }
 
-    fs.writeFileSync(CACHE_FILE, JSON.stringify([...cache, ...seen], null, 2));
-
-    // Create folder if needed
-    await page.goto(FOLDER_URL);
-    await page.waitForSelector("#new_folder_button");
-    await page.click("#new_folder_button");
-    await page.waitForSelector("#name");
-    await page.type("#name", folderName);
-    await page.select("#layout", "8109").catch(() => {});
-    await page.click('button[type="submit"]').catch(() => {});
-    await sleep(3000);
-
-    // Move contacts
-    await page.goto(CONTACTS_URL);
-    await sleep(2000);
-
-    await page.evaluate(() => {
-      const folders = Array.from(document.querySelectorAll("div.contacts-folder-nav-name"));
-      const target = folders.find(el => el.textContent.trim().toLowerCase() === "off market");
-      if (target) target.click();
-    });
-
-    await page.waitForSelector("#master_checkbox", { timeout: 10000 });
-    const box = await page.$("#master_checkbox");
-
-    if (box) {
-      await box.click();
-      await sleep(1000);
-      await page.click("#cm_move_button");
-      await sleep(1000);
-
-      const moveSel = `li.move-contacts-folder[title="${folderName}"] a.move-to-folder`;
-      const moveTarget = await page.$(moveSel);
-
-      if (moveTarget) {
-        const box = await moveTarget.boundingBox();
-        if (box) {
-          await moveTarget.click();
-          console.log("✅ Moved contacts to:", folderName);
-        } else {
-          console.warn("⚠️ Move target found but not clickable.");
-        }
-      } else {
-        console.warn("⚠️ Could not find folder to move contacts.");
-      }
-    } else {
-      console.warn("⚠️ Master checkbox not found.");
+    // Load cache
+    let sentCache = new Set();
+    if (fs.existsSync(CACHE_FILE)) {
+      try {
+        sentCache = new Set(JSON.parse(fs.readFileSync(CACHE_FILE, "utf-8")));
+      } catch {}
     }
 
+    const unsentLeads = [], newKeys = [];
+    for (const lead of filtered) {
+      const key = `${lead.full_name}|${lead.phone}`;
+      if (!sentCache.has(key)) {
+        unsentLeads.push(lead);
+        newKeys.push(key);
+      }
+    }
+
+    // Visit detail pages and scrape additional info
+    for (const lead of unsentLeads) {
+      const detailPage = await browser.newPage();
+      try {
+        await detailPage.goto(`https://www.vulcan7dialer.com/cm/index#contact/${lead.contact_id}`, { waitUntil: "domcontentloaded" });
+        await sleep(1200);
+
+        const detailData = await detailPage.evaluate(() => {
+          const safeText = (el) => (el?.textContent || "").replace(/\s+/g, " ").trim();
+          const normLabel = (s) => (s || "").toLowerCase().replace(/\s+/g, " ").replace(/:$/, "").trim();
+
+          const all = Array.from(document.querySelectorAll("*"));
+          const getByLabel = (label) => {
+            const want = normLabel(label);
+            const el = all.find((el) => normLabel(safeText(el)) === want);
+            if (!el) return "";
+            const sib = el.nextElementSibling;
+            return sib ? safeText(sib) : "";
+          };
+
+          const propertyType = getByLabel("Property Type");
+          const mlsNumber = getByLabel("MLS Number");
+          const mlsStatus = getByLabel("MLS Status");
+          const listPrice = getByLabel("List Price");
+          const beds = getByLabel("Beds");
+          const baths = getByLabel("Baths");
+          const squareFootage = getByLabel("Square Footage");
+          const daysOnMarket = getByLabel("Days On Market");
+
+          const links = Array.from(document.querySelectorAll("a[href]")).map(a => a.getAttribute("href") || "");
+          const zillow = links.find(h => h.includes("zillow.com")) || "";
+          const maps = links.find(h => h.includes("maps.google")) || "";
+
+          return {
+            property_type: propertyType, mls_number: mlsNumber, mls_status: mlsStatus,
+            list_price: listPrice, beds, baths, square_footage: squareFootage, days_on_market: daysOnMarket,
+            zillow_link: zillow, google_maps_link: maps,
+          };
+        });
+
+        Object.assign(lead, detailData);
+      } catch (err) {
+        console.warn(`⚠️ Failed to fetch extra info for ${lead.full_name}: ${err.message}`);
+      } finally {
+        await detailPage.close();
+        await sleep(200);
+      }
+    }
+
+    // Send to webhook
+    for (const lead of unsentLeads) {
+      try {
+        await axios.post(WEBHOOK_URL, { lead });
+        console.log(`📤 Sent: ${lead.full_name}`);
+      } catch (err) {
+        console.warn(`❌ Failed to send ${lead.full_name}: ${err.message}`);
+      }
+    }
+
+    // Save updated cache
+    const updatedCache = [...sentCache, ...newKeys];
+    fs.writeFileSync(CACHE_FILE, JSON.stringify(updatedCache, null, 2));
   } catch (err) {
-    console.error("❌ Error:", err);
+    console.error("❌ Script Error:", err);
+    try {
+      await page.screenshot({ path: "failure.png", fullPage: true });
+    } catch {}
   } finally {
     await browser.close();
   }
