@@ -78,7 +78,7 @@ await page.type(emailSel, EMAIL, { delay: 20 });
 await page.type(passSel, PASSWORD, { delay: 20 });
 
 await page.click('button[type="submit"], .login-button');
-await page.waitForNavigation({ waitUntil: "domcontentloaded", timeout: 10000 }).catch(() => {});
+await page.waitForSelector(".contacts-wrapper, .contact-list, #cm_contacts_container", { timeout: 15000 });
 await page.screenshot({ path: "post-login.png", fullPage: true });
 
 
