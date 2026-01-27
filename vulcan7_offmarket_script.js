@@ -280,4 +280,13 @@ for (const lead of unsentLeads) {
     // 💾 Save updated cache
     const updatedCache = [...sentCache, ...newKeys];
     fs.writeFileSync(CACHE_FILE, JSON.stringify(updatedCache, null, 2));
+    } catch (err) {
+    console.error("❌ Script Error:", err);
+    try {
+      await page.screenshot({ path: "failure.png", fullPage: true });
+    } catch {}
+    process.exitCode = 1;
+  } finally {
+    await browser.close();
+  }
 })();
