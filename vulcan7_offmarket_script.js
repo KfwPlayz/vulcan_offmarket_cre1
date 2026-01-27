@@ -89,8 +89,10 @@ const passSel = (await page.$('input[name="password"]')) ? 'input[name="password
 await page.type(emailSel, EMAIL, { delay: 20 });
 await page.type(passSel, PASSWORD, { delay: 20 });
 
-await page.click('button[type="submit"], .login-button');
-await page.waitForSelector(".contacts-wrapper, .contact-list, #cm_contacts_container", { timeout: 15000 });
+await Promise.all([
+      page.waitForNavigation({ waitUntil: "domcontentloaded", timeout: 120000 }),
+      page.click('button[type="submit"], .login-button')
+    ]);
 await page.screenshot({ path: "post-login.png", fullPage: true });
 
 
