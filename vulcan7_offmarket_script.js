@@ -80,15 +80,6 @@ async function clickFolderByName(page, name) {
 
     // Log in
 await page.goto(LOGIN_URL, { waitUntil: "domcontentloaded" });
-    // ✅ Handle cookie consent popup if present
-try {
-  await page.waitForSelector("button:has-text('Accept All'), button.accept-all, .cookie-accept-button", { timeout: 5000 });
-  await page.click("button:has-text('Accept All'), button.accept-all, .cookie-accept-button");
-  console.log("🍪 Accepted cookies");
-  await sleep(1000); // Let the DOM stabilize
-} catch (e) {
-  console.log("ℹ️ No cookie popup found, continuing...");
-}
 await page.waitForSelector('input[name="email"], #email, input[name="username"]');
 await page.waitForSelector('input[name="password"], #password');
 
