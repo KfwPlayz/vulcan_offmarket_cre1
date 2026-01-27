@@ -8,7 +8,7 @@ const PASSWORD = process.env.PASSWORD;
 const WEBHOOK_URL = process.env.WEBHOOK_URL;
 const EXEC_PATH = process.env.PUPPETEER_EXECUTABLE_PATH || "/usr/bin/chromium-browser";
 
-const CONTACTS_SHELL_URL = "https://www.vulcan7dialer.com/cm/index#contacts";
+const CONTACTS_SHELL_URL = "https://www.vulcan7dialer.com/cm/index#params/dmlld19pZD05ODEzOCZwYWdlPTE=";
 const LOGIN_URL = "https://www.vulcan7dialer.com/login";
 const FOLDER_URL = "https://www.vulcan7dialer.com/cm/folders/index";
 const CACHE_FILE = path.join(__dirname, "sent-leads-cache-offmarket.json");
