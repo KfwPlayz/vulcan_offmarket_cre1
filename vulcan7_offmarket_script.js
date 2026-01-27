@@ -14,7 +14,7 @@ const FOLDER_URL = "https://www.vulcan7dialer.com/cm/folders/index";
 const EMAIL = process.env.EMAIL;
 const PASSWORD = process.env.PASSWORD;
 const WEBHOOK_URL = process.env.WEBHOOK_URL;
-const CACHE_FILE = path.join(__dirname, "sent-leads-cache-fsbo.json");
+const CACHE_FILE = path.join(__dirname, "sent-leads-cache-offmarket.json");
 
 // 📅 Folder name = Monday of current week
 const today = new Date();
@@ -114,7 +114,7 @@ const folderName = `Expired Leads Week of ${monday.getMonth() + 1}.${monday.getD
       return leads;
     });
 
-    console.log(`✅ Found ${leads.length} raw leads in "FSBO"`);
+    console.log(`✅ Found ${leads.length} raw leads in "Off Market"`);
 
     // 📥 Deduplication
     const seen = new Set(), filtered = [], dupes = [];
@@ -216,7 +216,7 @@ const folderName = `Expired Leads Week of ${monday.getMonth() + 1}.${monday.getD
           await page.waitForSelector("div[role='option']", { timeout: 10000 });
           await page.evaluate(() => {
             const option = [...document.querySelectorAll("div[role='option']")]
-              .find(el => el.textContent.trim() === "FSBO");
+              .find(el => el.textContent.trim() === "Off Market");
             option?.click();
           });
         } catch {}
