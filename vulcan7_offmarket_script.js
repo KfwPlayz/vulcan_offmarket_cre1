@@ -67,19 +67,20 @@ async function clickFolderByName(page, name) {
     if (!EMAIL || !PASSWORD || !WEBHOOK_URL) throw new Error("Missing EMAIL, PASSWORD, or WEBHOOK_URL");
 
     // Log in
-    await page.goto(LOGIN_URL, { waitUntil: "domcontentloaded" });
-    await page.waitForSelector('input[name="email"], #email, input[name="username"]');
-    await page.waitForSelector('input[name="password"], #password');
+await page.goto(LOGIN_URL, { waitUntil: "domcontentloaded" });
+await page.waitForSelector('input[name="email"], #email, input[name="username"]');
+await page.waitForSelector('input[name="password"], #password');
 
-    const emailSel = (await page.$('input[name="email"]')) ? 'input[name="email"]' : (await page.$("#email")) ? "#email" : 'input[name="username"]';
-    const passSel = (await page.$('input[name="password"]')) ? 'input[name="password"]' : "#password";
+const emailSel = (await page.$('input[name="email"]')) ? 'input[name="email"]' : (await page.$("#email")) ? "#email" : 'input[name="username"]';
+const passSel = (await page.$('input[name="password"]')) ? 'input[name="password"]' : "#password";
 
-    await page.type(emailSel, EMAIL, { delay: 20 });
-    await page.type(passSel, PASSWORD, { delay: 20 });
-    await Promise.all([
-      page.waitForNavigation({ waitUntil: "domcontentloaded" }),
-      page.click('button[type="submit"], .login-button'),
-    ]);
+await page.type(emailSel, EMAIL, { delay: 20 });
+await page.type(passSel, PASSWORD, { delay: 20 });
+
+await page.click('button[type="submit"], .login-button');
+await page.waitForNavigation({ waitUntil: "domcontentloaded", timeout: 10000 }).catch(() => {});
+await page.screenshot({ path: "post-login.png", fullPage: true });
+
 
     // Go to contacts and click Off Market
     await page.goto(CONTACTS_SHELL_URL, { waitUntil: "domcontentloaded" });
