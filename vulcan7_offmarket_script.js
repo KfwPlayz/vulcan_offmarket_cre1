@@ -10,6 +10,7 @@ const EXEC_PATH = process.env.PUPPETEER_EXECUTABLE_PATH || "/usr/bin/chromium-br
 
 const LOGIN_URL = "https://www.vulcan7dialer.com/login";
 const CONTACTS_SHELL_URL = "https://www.vulcan7dialer.com/cm/index#params/dmlld19pZD05ODEzOCZwYWdlPTE=";
+const FOLDER_URL = "https://www.vulcan7dialer.com/cm/folders/index";
 const CACHE_FILE = path.join(__dirname, "sent-leads-cache-offmarket.json");
 
 // Helper
