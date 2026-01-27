@@ -111,13 +111,10 @@ jobs:
           path: sent-leads-cache-offmarket.json
           key: offmarket-cache-${{ steps.date.outputs.DATE_ET }}
 
-      - name: Upload failure artifact
-        if: failure()
+      - name: Upload all screenshots (optional)
         uses: actions/upload-artifact@v4
         with:
-          name: debug-artifacts
+          name: all-screenshots
           path: |
-            failure.png
-            failure_move.png
-            sent-leads-cache-offmarket.json
+            *.png
           if-no-files-found: ignore
