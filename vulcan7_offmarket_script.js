@@ -63,6 +63,18 @@ async function clickFolderByName(page, name) {
   page.setDefaultTimeout(120000);
   page.setDefaultNavigationTimeout(120000);
 
+   await page.setUserAgent(
+    "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/123 Safari/537.36"
+  );
+  await page.setViewport({ width: 1366, height: 768 });
+
+  await page.setRequestInterception(true);
+  page.on("request", req => {
+    const type = req.resourceType();
+    if (type === "image" || type === "font" || type === "media") req.abort();
+    else req.continue();
+  });
+
   try {
     if (!EMAIL || !PASSWORD || !WEBHOOK_URL) throw new Error("Missing EMAIL, PASSWORD, or WEBHOOK_URL");
 
