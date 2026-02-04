@@ -146,38 +146,119 @@ const folderName = `Expired Leads Week of ${monday.getMonth() + 1}.${monday.getD
     // }
     const unsentLeads = filtered;
 
-    // 🔍 Visit each contact detail page to fetch address info
     for (const lead of unsentLeads) {
-      const detailPage = await browser.newPage();
-      try {
-        const detailUrl = `https://www.vulcan7dialer.com/cm/index#contact/${lead.contact_id}`;
-        await detailPage.goto(detailUrl, { waitUntil: "domcontentloaded", timeout: 120000 });
-        await detailPage.waitForSelector('a[data-type="address"]', { timeout: 10000 });
+  const detailPage = await browser.newPage();
+  try {
+    const detailUrl = `https://www.vulcan7dialer.com/cm/index#contact/${lead.contact_id}`;
+    await detailPage.goto(detailUrl, { waitUntil: "domcontentloaded", timeout: 120000 });
 
-        const address = await detailPage.evaluate(() => {
-          const el = document.querySelector('a[data-type="address"]');
-          if (!el) return {};
-          try {
-            const data = JSON.parse(el.getAttribute("data-value") || "{}");
-            return {
-              street: data.address || "",
-              city: data.city || "",
-              state: data.state || "",
-              zip: data.zip || ""
-            };
-          } catch { return {}; }
-        });
+    await detailPage.waitForFunction(() => {
+      const ths = Array.from(document.querySelectorAll("th"));
+      return ths.some(th => th.textContent.includes("MLS Number"));
+    }, { timeout: 15000 });
 
-        Object.assign(lead, { street: "", city: "", state: "", zip: "" }, address);
-      } catch (err) {
-        console.error(`⚠️ Address fetch failed for ${lead.full_name}: ${err.message}`);
-        try { await detailPage.screenshot({ path: `failure_${lead.contact_id}.png`, fullPage: true }); } catch {}
-        Object.assign(lead, { street: "", city: "", state: "", zip: "" });
-      } finally {
-        await detailPage.close();
-        await sleep(300);
+    const detailData = await detailPage.evaluate(() => {
+      const clean = (t) => (t || "").replace(/\s+/g, " ").trim();
+
+      const getTextAfterTh = (label) => {
+        const ths = Array.from(document.querySelectorAll("tr th"));
+        for (const th of ths) {
+          const thText = clean(th.textContent || "").toLowerCase();
+          if (thText.includes(label.toLowerCase().replace(":", ""))) {
+            const td = th.nextElementSibling;
+            return td ? clean(td.textContent) : "";
+          }
+        }
+        return "";
+      };
+
+      const getBedsAndBaths = () => {
+        const val = getTextAfterTh("Beds");
+        const [bedsRaw, bathsRaw] = val.split("/").map(v => clean(v));
+        return {
+          beds: bedsRaw || "",
+          baths: bathsRaw || ""
+        };
+      };
+
+      // Address object
+      let address = { street: "", city: "", state: "", zip: "" };
+      const addrEl = document.querySelector('a[data-type="address"]');
+      if (addrEl) {
+        try {
+          const data = JSON.parse(addrEl.getAttribute("data-value") || "{}");
+          address = {
+            street: data.address || "",
+            city: data.city || "",
+            state: data.state || "",
+            zip: data.zip || ""
+          };
+        } catch {}
       }
-    }
+
+      // Link grabber
+      const links = Array.from(document.querySelectorAll("a[href]")).map(a => a.getAttribute("href"));
+
+      const matchLink = (pattern) => {
+        const regex = new RegExp(pattern, "i");
+        return links.find(href => regex.test(href)) || "";
+      };
+
+      const zillowRelative = links.find(h => h.includes("/zillow/go_to_site")) || "";
+      const zillowLink = zillowRelative ? `https://www.vulcan7dialer.com${zillowRelative}` : "";
+
+      const { beds, baths } = getBedsAndBaths();
+
+      return {
+        street: address.street,
+        city: address.city,
+        state: address.state,
+        zip: address.zip,
+        mls_number: getTextAfterTh("MLS Number"),
+        property_type: getTextAfterTh("Property Type"),
+        mls_status: getTextAfterTh("MLS Status"),
+        status_change_date: getTextAfterTh("Status Change Date"),
+        list_price: getTextAfterTh("List Price"),
+        beds,
+        baths,
+        square_footage: getTextAfterTh("Square Footage"),
+        days_on_market: getTextAfterTh("Days On Market"),
+        listing_agent: getTextAfterTh("Listing Agent"),
+        listing_office: getTextAfterTh("Listing Office"),
+        zillow_link: zillowLink,
+        google_maps_link: matchLink("google\\.(com|ca)/maps|maps\\.google"),
+        facebook: matchLink("facebook\\.com"),
+        instagram: matchLink("instagram\\.com"),
+        linkedin: matchLink("linkedin\\.com"),
+        twitter: matchLink("twitter\\.com"),
+        tiktok: matchLink("tiktok\\.com"),
+        youtube: matchLink("youtube\\.com")
+      };
+    });
+
+    Object.assign(
+      lead,
+      {
+        street: "", city: "", state: "", zip: "",
+        mls_number: "", property_type: "", mls_status: "", status_change_date: "", list_price: "",
+        beds: "", baths: "", square_footage: "", days_on_market: "",
+        listing_agent: "", listing_office: "",
+        zillow_link: "", google_maps_link: "",
+        facebook: "", instagram: "", linkedin: "", twitter: "", tiktok: "", youtube: ""
+      },
+      detailData
+    );
+
+  } catch (err) {
+    console.error(`⚠️ Detail fetch failed for ${lead.full_name}: ${err.message}`);
+    try {
+      await detailPage.screenshot({ path: `failure_${lead.contact_id}.png`, fullPage: true });
+    } catch {}
+  } finally {
+    await detailPage.close();
+    await sleep(300);
+  }
+}
 
     // 📤 Send to Zapier
     for (const lead of unsentLeads) {
