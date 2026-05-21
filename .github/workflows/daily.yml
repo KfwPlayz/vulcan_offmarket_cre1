@@ -2,8 +2,8 @@ name: Daily Vulcan7 Off-Market Job
 
 on:
   schedule:
-    - cron: "0 13 * * *"   # 9:00 AM ET during DST (UTC-4)
-    - cron: "0 14 * * *"   # 9:00 AM ET during Standard Time (UTC-5)
+    - cron: "0 11 * * *"   # 9:00 AM ET during DST (UTC-4)
+    - cron: "0 12 * * *"   # 9:00 AM ET during Standard Time (UTC-5)
   workflow_dispatch:
     inputs:
       force:
