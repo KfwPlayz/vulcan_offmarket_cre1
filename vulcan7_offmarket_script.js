@@ -18,6 +18,7 @@ const WEBHOOK_URL = process.env.WEBHOOK_URL;
 (async () => {
   const browser = await puppeteer.launch({
     headless: "new",
+    protocolTimeout: 180000,
     executablePath: process.env.PUPPETEER_EXECUTABLE_PATH || "/usr/bin/chromium-browser",
     args: [
       "--no-sandbox",
